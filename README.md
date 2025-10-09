@@ -66,7 +66,7 @@ If you use EVE in your GTA V projects, share your feedback, videos, or ideas —
 - Original development by **Ali Alidoust**
 - Continued by the **GTA V modding community**
 - Inspiration from countless creators using Rockstar Editor to tell amazing stories
-- Revival initated by MiffedLyric together with Miffed Films - One of many amazing cinematic creators / studios for Gta 5 and FiveM.
+- Revival initiated by MiffedLyric together with Miffed Films - One of many amazing cinematic creators / studios for Gta 5 and FiveM.
 
 ---
 
