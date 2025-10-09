@@ -1,0 +1,53 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# VC++ Specific
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.VC.opendb
+
+x64/
+Debug/
+gta5-extended-video-export/lib/
+gta5-extended-video-export/inc/
+gta5-extended-video-export/Debug/
+gta5-extended-video-export/x64/
+.vs/
+ipch/
+packages/
+/.idea
+
+# ScriptHookV
+/ScriptHookV
+!/ScriptHookV/HOWTO.TXT
+
+# cmake
+/out
+/voukoder
