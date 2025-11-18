@@ -1,5 +1,9 @@
 # 🎬 EVE (Extended Video Export) — Community Edition
 
+## STATUS: Development has started and we are working on getting a stable first version available. Watch this repo for updates but please understand that it will take time as we are doing this in our free time and as a hobby based project.
+
+
+
 > Reviving and improving the ultimate cinematic export tool for GTA V’s Rockstar Editor.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
