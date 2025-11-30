@@ -211,6 +211,23 @@ inline std::wstring utf8_decode(const std::string& str) {
     return wstrTo;
 }
 
-std::string AsiPath(); 
+std::string AsiPath();
+
+#define PERFORM_SINGLE_BYTE_PATCH(address, byte, label)                                                               \
+    do {                                                                                                               \
+        if ((address) != 0) {                                                                                          \
+            DWORD oldProtect;                                                                                          \
+            uint8_t* patchAddr = reinterpret_cast<uint8_t*>(address);                                                 \
+            if (VirtualProtect(patchAddr, 1, PAGE_EXECUTE_READWRITE, &oldProtect)) {                                  \
+                *patchAddr = (byte);                                                                                   \
+                VirtualProtect(patchAddr, 1, oldProtect, &oldProtect);                                                \
+                LOG(LL_NFO, label, " patched successfully at ", Logger::hex(address, 16));                            \
+            } else {                                                                                                   \
+                LOG(LL_ERR, "Failed to patch ", label, ": VirtualProtect failed");                                    \
+            }                                                                                                          \
+        } else {                                                                                                       \
+            LOG(LL_WRN, label, " address not found, cannot patch");                                                   \
+        }                                                                                                              \
+    } while (0)
 
 #undef RETURN_STR

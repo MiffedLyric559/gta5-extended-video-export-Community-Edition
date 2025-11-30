@@ -735,12 +735,14 @@ void eve::initialize() {
         uint64_t pCreateThread = NULL;
         uint64_t pIsPendingPendingBakeStart = NULL;
         uint64_t pStartBakeProject = NULL;
+        uint64_t pWatermarkRenderer = NULL;
         
         pYaraHelper->AddEntry("get_render_time_base_function", yara_get_render_time_base_function, &pGetRenderTimeBase);
         pYaraHelper->AddEntry("create_thread_function", yara_create_thread_function, &pCreateThread);
         pYaraHelper->AddEntry("create_texture_function", yara_create_texture_function, &pCreateTexture);
         pYaraHelper->AddEntry("is_pending_pending_bake_start", yara_is_pending_pending_bake_start, &pIsPendingPendingBakeStart);
         pYaraHelper->AddEntry("start_bake_project", yara_start_bake_project, &pStartBakeProject);
+        pYaraHelper->AddEntry("watermark_renderer_render", yara_watermark_renderer_render, &pWatermarkRenderer);
         pYaraHelper->PerformScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
@@ -748,6 +750,7 @@ void eve::initialize() {
         logResolvedHookTarget("CreateThread", pCreateThread);
         logResolvedHookTarget("IsPendingPendingBakeStart", pIsPendingPendingBakeStart);
         logResolvedHookTarget("StartBakeProject", pStartBakeProject);
+        logResolvedHookTarget("WatermarkRenderer", pWatermarkRenderer);
         
         // IsPendingPendingBakeStart is too small to hook, so we store it as a function pointer
         if (pIsPendingPendingBakeStart) {
@@ -795,6 +798,13 @@ void eve::initialize() {
             } else {
                 LOG(LL_ERR, "Could not find the address for StartBakeProject function.");
                 LOG(LL_ERR, "Dual-pass audio rendering will NOT be available!");
+            }
+            
+            // Disable watermark if configured
+            if (config::disable_watermark) {
+                PERFORM_SINGLE_BYTE_PATCH(pWatermarkRenderer, 0xC3, "Watermark renderer");
+            } else {
+                LOG(LL_DBG, "Watermark renderer not disabled (disable_watermark=false)");
             }
             
         } catch (std::exception& ex) {

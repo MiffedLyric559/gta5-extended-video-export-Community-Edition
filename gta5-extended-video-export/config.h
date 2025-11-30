@@ -25,6 +25,7 @@
 #define CFG_EXPORT_MB_STRENGTH "motion_blur_strength"
 #define CFG_EXPORT_FPS "fps"
 #define CFG_EXPORT_OPENEXR "export_openexr"
+#define CFG_DISABLE_WATERMARK "disable_watermark"
 
 #define CFG_FORMAT_SECTION "FORMAT"
 #define CFG_EXPORT_FORMAT "format"
@@ -50,6 +51,7 @@ class config {
     static bool is_mod_enabled;
     static bool auto_reload_config;
     static bool export_openexr;
+    static bool disable_watermark;
     static std::string output_dir;
     static LogLevel log_level;
     static std::pair<uint32_t, uint32_t> fps;
@@ -68,6 +70,7 @@ class config {
         motion_blur_samples = parse_motion_blur_samples();
         motion_blur_strength = parse_motion_blur_strength();
         export_openexr = parse_export_openexr();
+        disable_watermark = parse_disable_watermark();
 
         readEncoderConfig();
     }
@@ -259,6 +262,18 @@ class config {
         }
 
         return failed(CFG_EXPORT_OPENEXR, string, false);
+    }
+
+    static bool parse_disable_watermark() {
+        const std::string string = config_parser->GetString(CFG_EXPORT_SECTION, CFG_DISABLE_WATERMARK, "");
+
+        try {
+            return succeeded(CFG_DISABLE_WATERMARK, stringToBoolean(string));
+        } catch (std::exception& ex) {
+            LOG(LL_ERR, ex.what());
+        }
+
+        return failed(CFG_DISABLE_WATERMARK, string, false);
     }
 
     static std::string parse_output_dir() {

@@ -13,4 +13,5 @@ std::pair<uint32_t, uint32_t> config::fps;
 uint8_t config::motion_blur_samples;
 float config::motion_blur_strength;
 bool config::export_openexr;
+bool config::disable_watermark;
 VKENCODERCONFIG config::encoder_config;

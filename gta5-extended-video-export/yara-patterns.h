@@ -15,3 +15,6 @@ const std::string yara_create_export_context_function = "40 53 48 81 EC A0 00 00
 // Dual-pass audio rendering functions
 const std::string yara_is_pending_pending_bake_start = "83 3D ?? ?? ?? ?? 04 0F 94 C0 C3";
 const std::string yara_start_bake_project = "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 40 32 FF 48 83 3D ?? ?? ?? ?? 00 48 8B DA 48 8B F1";
+
+// Matermark rendering
+const std::string yara_watermark_renderer_render = "48 83 EC ?? 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? BA ?? ?? ?? ?? 48 8B 04 C8 8B 0C 02 D1 E9 F6 C1 ?? 74 ?? 83 3D";
