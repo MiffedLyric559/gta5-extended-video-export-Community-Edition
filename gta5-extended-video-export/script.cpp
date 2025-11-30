@@ -26,6 +26,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #include <variant>
 
@@ -150,6 +151,43 @@ struct ExportContext {
 
 std::unique_ptr<ExportContext> exportContext;
 std::unique_ptr<YaraHelper> pYaraHelper;
+
+// Dual-pass audio rendering state tracking
+enum class DualPassState {
+    IDLE,              // Not exporting
+    PASS1_RUNNING,     // Pass 1 (audio only) in progress
+    PASS1_COMPLETE,    // Pass 1 finished, waiting to trigger Pass 2
+    PASS2_PENDING,     // About to start Pass 2
+    PASS2_RUNNING,     // Pass 2 (video only) in progress
+    PASS2_COMPLETE     // Pass 2 finished, ready to mux
+};
+
+struct DualPassContext {
+    DualPassState state = DualPassState::IDLE;
+    void* saved_video_editor_interface = nullptr;
+    void* saved_montage_ptr = nullptr;
+    
+    // Save original settings for restoration in Pass 2
+    std::pair<int32_t, int32_t> original_fps;
+    int32_t original_motion_blur_samples = 0;
+    
+    // Track output filenames
+    std::string timestamp;
+    std::string final_output_file;
+    
+    // In-memory audio buffer for Pass 1 capture (dynamically grows)
+    std::vector<BYTE> audio_buffer;
+    uint32_t audio_sample_rate = 48000;
+    uint16_t audio_channels = 2;
+    uint16_t audio_bits_per_sample = 16;
+    uint32_t audio_block_align = 4;  // channels * (bits_per_sample / 8)
+    size_t audio_buffer_playback_position = 0;  // For Pass 2 replay
+};
+
+std::unique_ptr<DualPassContext> dualPassContext;
+
+// IsPendingPendingBakeStart function pointer (too small to hook, so we call it directly)
+IsPendingPendingBakeStartFunc pIsPendingPendingBakeStartFunc = nullptr;
 
 bool bindExportSwapChainIfAvailableLocked() {
     if (!exportContext) {
@@ -695,14 +733,27 @@ void eve::initialize() {
         uint64_t pGetRenderTimeBase = NULL;
         uint64_t pCreateTexture = NULL;
         uint64_t pCreateThread = NULL;
+        uint64_t pIsPendingPendingBakeStart = NULL;
+        uint64_t pStartBakeProject = NULL;
+        
         pYaraHelper->AddEntry("get_render_time_base_function", yara_get_render_time_base_function, &pGetRenderTimeBase);
         pYaraHelper->AddEntry("create_thread_function", yara_create_thread_function, &pCreateThread);
         pYaraHelper->AddEntry("create_texture_function", yara_create_texture_function, &pCreateTexture);
+        pYaraHelper->AddEntry("is_pending_pending_bake_start", yara_is_pending_pending_bake_start, &pIsPendingPendingBakeStart);
+        pYaraHelper->AddEntry("start_bake_project", yara_start_bake_project, &pStartBakeProject);
         pYaraHelper->PerformScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
         logResolvedHookTarget("CreateTexture", pCreateTexture);
         logResolvedHookTarget("CreateThread", pCreateThread);
+        logResolvedHookTarget("IsPendingPendingBakeStart", pIsPendingPendingBakeStart);
+        logResolvedHookTarget("StartBakeProject", pStartBakeProject);
+        
+        // IsPendingPendingBakeStart is too small to hook, so we store it as a function pointer
+        if (pIsPendingPendingBakeStart) {
+            pIsPendingPendingBakeStartFunc = reinterpret_cast<IsPendingPendingBakeStartFunc>(pIsPendingPendingBakeStart);
+            LOG(LL_NFO, "IsPendingPendingBakeStart function pointer saved (calling directly, not hooking)");
+        }
 
         try {
             if (pGetRenderTimeBase) {
@@ -734,6 +785,18 @@ void eve::initialize() {
             } else {
                 LOG(LL_ERR, "Could not find the address for CreateThread function.");
             }
+
+            // Install dual-pass audio rendering hooks
+            if (pStartBakeProject) {
+                PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(StartBakeProject, pStartBakeProject,
+                                                      PLH::x64Detour::detour_scheme_t::INPLACE);
+                LOG(LL_NFO, "StartBakeProject hook installed. trampoline:",
+                    reinterpret_cast<void*>(GameHooks::StartBakeProject::OriginalFunc));
+            } else {
+                LOG(LL_ERR, "Could not find the address for StartBakeProject function.");
+                LOG(LL_ERR, "Dual-pass audio rendering will NOT be available!");
+            }
+            
         } catch (std::exception& ex) {
             LOG(LL_ERR, ex.what());
         }
@@ -752,6 +815,7 @@ void eve::ScriptMain() {
         if (!isD3D11HookInstalled) {
             ensureD3D11Hook();
         }
+        
         WAIT(0);
     }
 }
@@ -833,14 +897,18 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
         if (!bindExportSwapChainIfAvailable()) {
             LOG(LL_TRC, "Swap chain not bound yet; skipping export capture for this frame");
         } else {
+            // Skip video capture during Pass 1 (audio-only mode)
+            if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                LOG(LL_TRC, "Pass 1 (audio-only): Skipping video frame capture");
+                // Don't capture video frames - just let the frame render normally
+            } else {
+                // Pass 2 or normal mode: Capture video frames
+                try {
+                    ComPtr<ID3D11Device> pDevice;
+                    p_this->GetDevice(pDevice.GetAddressOf());
 
-            // Time to capture rendered frame
-            try {
-            ComPtr<ID3D11Device> pDevice;
-            p_this->GetDevice(pDevice.GetAddressOf());
-
-            ComPtr<ID3D11Texture2D> pDepthBufferCopy = nullptr;
-            ComPtr<ID3D11Texture2D> pBackBufferCopy = nullptr;
+                    ComPtr<ID3D11Texture2D> pDepthBufferCopy = nullptr;
+                    ComPtr<ID3D11Texture2D> pBackBufferCopy = nullptr;
 
             if (config::export_openexr) {
                 TRY([&] {
@@ -927,11 +995,12 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                 p_this->Unmap(result.Get(), 0);
             }
             ::exportContext->total_frame_num++;
-        } catch (std::exception&) {
-            LOG(LL_ERR, "Reading video frame from D3D Device failed.");
-            LOG_CALL(LL_DBG, encodingSession.reset());
-            LOG_CALL(LL_DBG, ::exportContext.reset());
-        }
+                } catch (std::exception&) {
+                    LOG(LL_ERR, "Reading video frame from D3D Device failed.");
+                    LOG_CALL(LL_DBG, encodingSession.reset());
+                    LOG_CALL(LL_DBG, ::exportContext.reset());
+                }
+            } // End of Pass 2/normal mode video capture
         }
     }
     LOG_CALL(LL_TRC, ID3D11DeviceContextHooks::OMSetRenderTargets::OriginalFunc(
@@ -1070,10 +1139,11 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     float gameFrameRate =
                         (static_cast<float>(fps.first) * (static_cast<float>(config::motion_blur_samples) + 1) /
                          static_cast<float>(fps.second));
-                    if (gameFrameRate > 60.0f) {
-                        LOG(LL_NON, "fps * (motion_blur_samples + 1) > 60.0!!!");
-                        LOG(LL_NON, "Audio export will be disabled!!!");
-                        ::exportContext->is_audio_export_disabled = true;
+                    
+                    LOG(LL_DBG, "Effective frame rate: ", gameFrameRate, " FPS");
+                    
+                    if (dualPassContext) {
+                        LOG(LL_DBG, "Dual-pass state: ", static_cast<int>(dualPassContext->state));
                     }
                 }
 
@@ -1087,72 +1157,149 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                 pInputMediaType->GetGUID(MF_MT_SUBTYPE, &subType);
 
                 char buffer[128];
-                std::string output_file = config::output_dir;
-                std::string exrOutputPath;
-
-                output_file += "\\EVE-";
-                time_t rawtime;
-                struct tm timeinfo;
-                time(&rawtime);
-                localtime_s(&timeinfo, &rawtime);
-                strftime(buffer, 128, "%Y%m%d%H%M%S", &timeinfo);
-                output_file += buffer;
-                exrOutputPath = std::regex_replace(output_file, std::regex("\\\\+"), "\\");
-                output_file += ".mp4";
-
-                std::string filename = std::regex_replace(output_file, std::regex("\\\\+"), "\\");
+                std::string output_file = config::output_dir + "\\EVE-";
+                
+                // Dual-pass: Use saved timestamp for Pass 2, generate new one for Pass 1
+                std::string timestamp_str;
+                if (dualPassContext && 
+                    (dualPassContext->state == DualPassState::PASS2_PENDING || 
+                     dualPassContext->state == DualPassState::PASS2_RUNNING) && 
+                    !dualPassContext->timestamp.empty()) {
+                    // Pass 2: Reuse timestamp from Pass 1
+                    timestamp_str = dualPassContext->timestamp;
+                    LOG(LL_DBG, "Pass 2: Reusing timestamp from Pass 1: ", timestamp_str);
+                } else {
+                    auto now = std::chrono::system_clock::now();
+                    auto now_ms = std::chrono::time_point_cast<std::chrono::milliseconds>(now);
+                    auto epoch = now_ms.time_since_epoch();
+                    auto value = std::chrono::duration_cast<std::chrono::milliseconds>(epoch);
+                    long long milliseconds = value.count() % 1000;
+                    
+                    time_t rawtime = std::chrono::system_clock::to_time_t(now);
+                    struct tm timeinfo;
+                    localtime_s(&timeinfo, &rawtime);
+                    strftime(buffer, 128, "%Y%m%d%H%M%S", &timeinfo);
+                    
+                    timestamp_str = std::string(buffer) + "_" + std::to_string(milliseconds);
+                    
+                    if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                        // Save timestamp for Pass 2
+                        dualPassContext->timestamp = timestamp_str;
+                        LOG(LL_DBG, "Pass 1: Saved timestamp for Pass 2: ", timestamp_str);
+                    }
+                }
+                
+                output_file += timestamp_str;
+                
+                std::string filename;
+                if (dualPassContext) {
+                    LOG(LL_DBG, "SetInputMediaType: dualPassContext state = ", static_cast<int>(dualPassContext->state));
+                    if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                        // Pass 1: audio only (in-memory capture)
+                        dualPassContext->final_output_file = output_file + ".mp4";
+                        LOG(LL_NFO, "Pass 1 audio output: IN-MEMORY BUFFER");
+                        LOG(LL_NFO, "Pass 1 final output will be: ", dualPassContext->final_output_file);
+                        
+                        // Initialize audio buffer metadata
+                        dualPassContext->audio_sample_rate = sampleRate;
+                        dualPassContext->audio_channels = static_cast<uint16_t>(numChannels);
+                        dualPassContext->audio_bits_per_sample = static_cast<uint16_t>(bitsPerSample);
+                        dualPassContext->audio_block_align = blockAlignment;
+                        dualPassContext->audio_buffer.clear();
+                        dualPassContext->audio_buffer.reserve(1024 * 1024 * 64); // Reserve 64MB initially
+                        dualPassContext->audio_buffer_playback_position = 0;
+                        LOG(LL_NFO, "Audio buffer initialized: ", sampleRate, "Hz, ", numChannels, " channels, ", bitsPerSample, " bits");
+                    } else if (dualPassContext->state == DualPassState::PASS2_PENDING || 
+                               dualPassContext->state == DualPassState::PASS2_RUNNING) {
+                        // Pass 2: video + buffered audio -> final output
+                        filename = dualPassContext->final_output_file;
+                        LOG(LL_NFO, "Pass 2 output (video + buffered audio): ", filename);
+                        LOG(LL_NFO, "  Buffered audio size: ", dualPassContext->audio_buffer.size(), " bytes");
+                    } else {
+                        LOG(LL_DBG, "SetInputMediaType: State not PASS1 or PASS2, using default filename");
+                        filename = output_file + ".mp4";
+                    }
+                } else {
+                    LOG(LL_DBG, "SetInputMediaType: No dualPassContext, using default filename");
+                    filename = output_file + ".mp4";
+                }
 
                 LOG(LL_NFO, "Output file: ", filename);
 
-                DXGI_SWAP_CHAIN_DESC desc{};
-                if (bindExportSwapChainIfAvailable()) {
-                    ::exportContext->p_swap_chain->GetDesc(&desc);
-                } else if (::exportContext->p_export_render_target) {
-                    D3D11_TEXTURE2D_DESC targetDesc;
-                    ::exportContext->p_export_render_target->GetDesc(&targetDesc);
-                    desc.BufferDesc.Width = targetDesc.Width;
-                    desc.BufferDesc.Height = targetDesc.Height;
-                    LOG(LL_WRN, "Swap chain not available during SetInputMediaType; using export texture dimensions");
+                // Skip Voukoder encoder creation during Pass 1 (audio-only mode)
+                // We only buffer audio in memory during Pass 1
+                if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                    LOG(LL_NFO, "Pass 1 (audio-only): Skipping Voukoder encoder creation");
+                    LOG(LL_NFO, "Audio will be buffered in memory");
+                    // Don't create encoder context - audio buffer already initialized above
                 } else {
-                    throw std::runtime_error("Export context missing swap chain and render target");
+                    // Pass 2 or normal mode: Create full Voukoder encoder (video + audio)
+                    if (dualPassContext && 
+                        (dualPassContext->state == DualPassState::PASS2_PENDING || 
+                         dualPassContext->state == DualPassState::PASS2_RUNNING)) {
+                        LOG(LL_NFO, "Pass 2: Creating Voukoder encoder for video + buffered audio replay");
+                    }
+                    DXGI_SWAP_CHAIN_DESC desc{};
+                    if (bindExportSwapChainIfAvailable()) {
+                        ::exportContext->p_swap_chain->GetDesc(&desc);
+                    } else if (::exportContext->p_export_render_target) {
+                        D3D11_TEXTURE2D_DESC targetDesc;
+                        ::exportContext->p_export_render_target->GetDesc(&targetDesc);
+                        desc.BufferDesc.Width = targetDesc.Width;
+                        desc.BufferDesc.Height = targetDesc.Height;
+                        LOG(LL_WRN, "Swap chain not available during SetInputMediaType; using export texture dimensions");
+                    } else {
+                        throw std::runtime_error("Export context missing swap chain and render target");
+                    }
+
+                    const auto exportWidth = desc.BufferDesc.Width;
+                    const auto exportHeight = desc.BufferDesc.Height;
+
+                    // Get pBackBufferResolved dimensions for OpenEXR export
+                    D3D11_TEXTURE2D_DESC backBufferCopyDesc;
+                    pGameBackBufferResolved->GetDesc(&backBufferCopyDesc);
+                    const auto openExrWidth = backBufferCopyDesc.Width;
+                    const auto openExrHeight = backBufferCopyDesc.Height;
+
+                    LOG(LL_DBG, "Video Export Resolution: ", exportWidth, "x", exportHeight);
+                    LOG(LL_DBG, "OpenEXR Export Resolution: ", openExrWidth, "x", openExrHeight);
+
+                    D3D11_TEXTURE2D_DESC motionBlurBufferDesc;
+                    motionBlurBufferDesc.Width = exportWidth;
+                    motionBlurBufferDesc.Height = exportHeight;
+                    motionBlurBufferDesc.MipLevels = 1;
+                    motionBlurBufferDesc.ArraySize = 1;
+                    motionBlurBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    motionBlurBufferDesc.SampleDesc.Count = 1;
+                    motionBlurBufferDesc.SampleDesc.Quality = 0;
+                    motionBlurBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+                    motionBlurBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                    motionBlurBufferDesc.CPUAccessFlags = 0;
+                    motionBlurBufferDesc.MiscFlags = 0;
+
+                    CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
+
+                    REQUIRE(encodingSession->createContext(
+                                config::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
+                                exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
+                                config::export_openexr, openExrWidth, openExrHeight),
+                            "Failed to create encoding context.");
                 }
-
-                const auto exportWidth = desc.BufferDesc.Width;
-                const auto exportHeight = desc.BufferDesc.Height;
-
-                // Get pBackBufferResolved dimensions for OpenEXR export
-                D3D11_TEXTURE2D_DESC backBufferCopyDesc;
-                pGameBackBufferResolved->GetDesc(&backBufferCopyDesc);
-                const auto openExrWidth = backBufferCopyDesc.Width;
-                const auto openExrHeight = backBufferCopyDesc.Height;
-
-                LOG(LL_DBG, "Video Export Resolution: ", exportWidth, "x", exportHeight);
-                LOG(LL_DBG, "OpenEXR Export Resolution: ", openExrWidth, "x", openExrHeight);
-
-                D3D11_TEXTURE2D_DESC motionBlurBufferDesc;
-                motionBlurBufferDesc.Width = exportWidth;
-                motionBlurBufferDesc.Height = exportHeight;
-                motionBlurBufferDesc.MipLevels = 1;
-                motionBlurBufferDesc.ArraySize = 1;
-                motionBlurBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                motionBlurBufferDesc.SampleDesc.Count = 1;
-                motionBlurBufferDesc.SampleDesc.Quality = 0;
-                motionBlurBufferDesc.Usage = D3D11_USAGE_DEFAULT;
-                motionBlurBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-                motionBlurBufferDesc.CPUAccessFlags = 0;
-                motionBlurBufferDesc.MiscFlags = 0;
-
-                CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
-
-                REQUIRE(encodingSession->createContext(
-                            config::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
-                            exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
-                            config::export_openexr, openExrWidth, openExrHeight),
-                        "Failed to create encoding context.");
             } catch (std::exception& ex) {
                 LOG(LL_ERR, ex.what());
                 LOG_CALL(LL_DBG, encodingSession.reset());
                 LOG_CALL(LL_DBG, ::exportContext.reset());
+                
+                // Reset dual-pass context on error to prevent stale state
+                if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+                    LOG(LL_ERR, "Resetting dual-pass context due to error");
+                    dualPassContext->state = DualPassState::IDLE;
+                    dualPassContext->audio_buffer.clear();
+                    dualPassContext->audio_buffer.shrink_to_fit();
+                    dualPassContext->saved_video_editor_interface = nullptr;
+                    dualPassContext->saved_montage_ptr = nullptr;
+                }
+                
                 return MF_E_INVALIDMEDIATYPE;
             }
         }
@@ -1178,8 +1325,40 @@ HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DW
             BYTE* buffer;
             if (SUCCEEDED(pBuffer->Lock(&buffer, NULL, NULL))) {
                 try {
-                    LOG_CALL(LL_DBG, encodingSession->writeAudioFrame(
-                                         buffer, length / 4 /* 2 channels * 2 bytes per sample*/, sampleTime));
+                    // Check if we're in Pass 1 - append to memory buffer
+                    if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                        // Append raw PCM samples to in-memory buffer (grows dynamically)
+                        size_t old_size = dualPassContext->audio_buffer.size();
+                        dualPassContext->audio_buffer.resize(old_size + length);
+                        std::memcpy(dualPassContext->audio_buffer.data() + old_size, buffer, length);
+                        LOG(LL_TRC, "Pass 1: Buffered ", length, " bytes of audio (total: ", dualPassContext->audio_buffer.size(), " bytes)");
+                    } else if (dualPassContext && 
+                               (dualPassContext->state == DualPassState::PASS2_PENDING || 
+                                dualPassContext->state == DualPassState::PASS2_RUNNING)) {
+                        // Pass 2: Replay buffered audio from Pass 1
+                        size_t bytes_remaining = dualPassContext->audio_buffer.size() - dualPassContext->audio_buffer_playback_position;
+                        
+                        if (bytes_remaining > 0) {
+                            // Send the same chunk size as we're receiving (or what's left)
+                            size_t chunk_size = std::min(static_cast<size_t>(length), bytes_remaining);
+                            
+                            BYTE* buffered_audio = dualPassContext->audio_buffer.data() + dualPassContext->audio_buffer_playback_position;
+                            LOG_CALL(LL_DBG, encodingSession->writeAudioFrame(
+                                                 buffered_audio, 
+                                                 chunk_size / 4 /* 2 channels * 2 bytes per sample*/, 
+                                                 sampleTime));
+                            
+                            dualPassContext->audio_buffer_playback_position += chunk_size;
+                            LOG(LL_TRC, "Pass 2: Sent ", chunk_size, " bytes from buffer (pos: ", 
+                                dualPassContext->audio_buffer_playback_position, "/", dualPassContext->audio_buffer.size(), ")");
+                        } else {
+                            LOG(LL_WRN, "Pass 2: Audio buffer exhausted! No more audio to send.");
+                        }
+                    } else {
+                        // Normal mode (no dual-pass) - send live audio to Voukoder
+                        LOG_CALL(LL_DBG, encodingSession->writeAudioFrame(
+                                             buffer, length / 4 /* 2 channels * 2 bytes per sample*/, sampleTime));
+                    }
                 } catch (std::exception& ex) {
                     LOG(LL_ERR, ex.what());
                 }
@@ -1189,6 +1368,14 @@ HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DW
             LOG(LL_ERR, ex.what());
             LOG_CALL(LL_DBG, encodingSession.reset());
             LOG_CALL(LL_DBG, ::exportContext.reset());
+            
+            // Reset dual-pass context on error to prevent stale state
+            if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+                LOG(LL_ERR, "Resetting dual-pass context due to WriteSample error");
+                dualPassContext->state = DualPassState::IDLE;
+                dualPassContext->audio_buffer.clear();
+                dualPassContext->audio_buffer.shrink_to_fit();
+            }
         }
     }
     return S_OK;
@@ -1196,19 +1383,137 @@ HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DW
 
 HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
     PRE();
+    
+    // Check dual-pass state BEFORE acquiring lock or resetting anything
+    LOG(LL_NFO, "Finalize called - checking dual-pass state");
+    if (dualPassContext) {
+        LOG(LL_NFO, "  dualPassContext exists, state =", static_cast<int>(dualPassContext->state));
+    } else {
+        LOG(LL_NFO, "  dualPassContext is NULL");
+    }
+    
     std::lock_guard<std::mutex> sessionLock(mxSession);
     try {
         if (encodingSession != NULL) {
-            LOG_CALL(LL_DBG, encodingSession->finishAudio());
-            LOG_CALL(LL_DBG, encodingSession->finishVideo());
-            LOG_CALL(LL_DBG, encodingSession->endSession());
+            // Check if this is Pass 1 completing - if so, trigger Pass 2
+            if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                LOG(LL_NFO, "PASS 1 COMPLETE - Audio capture finished");
+                LOG(LL_NFO, "  Total audio buffered: ", dualPassContext->audio_buffer.size(), " bytes");
+                LOG(LL_NFO, "  Audio duration: ~", 
+                    (dualPassContext->audio_buffer.size() / dualPassContext->audio_block_align / dualPassContext->audio_sample_rate), 
+                    " seconds");
+                
+                // Skip encoder finalization - Voukoder context was never created for audio-only mode
+                LOG(LL_NFO, "Skipping Voukoder finalization (audio-only mode)");
+                
+                dualPassContext->state = DualPassState::PASS1_COMPLETE;
+                
+                // Trigger Pass 2 in a separate thread to avoid blocking
+                std::thread([]{
+                    LOG(LL_NFO, "Waiting 2 seconds before triggering Pass 2...");
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    
+                    if (dualPassContext && 
+                        dualPassContext->saved_video_editor_interface && 
+                        dualPassContext->saved_montage_ptr && 
+                        GameHooks::StartBakeProject::OriginalFunc) {
+                        
+                        LOG(LL_NFO, "Triggering PASS 2 for video export...");
+                        dualPassContext->state = DualPassState::PASS2_RUNNING;
+                        LOG(LL_NFO, "  State changed to PASS2_RUNNING before triggering");
+                        
+                        bool result = GameHooks::StartBakeProject::OriginalFunc(
+                            dualPassContext->saved_video_editor_interface,
+                            dualPassContext->saved_montage_ptr
+                        );
+                        
+                        if (result) {
+                            LOG(LL_NFO, "Pass 2 triggered successfully");
+                        } else {
+                            LOG(LL_ERR, "Failed to trigger Pass 2!");
+                            dualPassContext->state = DualPassState::IDLE;
+                        }
+                    } else {
+                        LOG(LL_ERR, "Cannot trigger Pass 2 - missing pointers");
+                        if (dualPassContext) {
+                            LOG(LL_ERR, "  State:", static_cast<int>(dualPassContext->state));
+                            LOG(LL_ERR, "  videoEditorInterface:", dualPassContext->saved_video_editor_interface);
+                            LOG(LL_ERR, "  montage:", dualPassContext->saved_montage_ptr);
+                            LOG(LL_ERR, "  OriginalFunc:", reinterpret_cast<void*>(GameHooks::StartBakeProject::OriginalFunc));
+                            dualPassContext->state = DualPassState::IDLE;
+                        }
+                    }
+                }).detach();
+            }
+            else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
+                LOG(LL_NFO, "PASS 2 COMPLETE - Video export finished");
+                
+                // Finalize Voukoder encoder
+                LOG_CALL(LL_DBG, encodingSession->finishAudio());
+                LOG_CALL(LL_DBG, encodingSession->finishVideo());
+                LOG_CALL(LL_DBG, encodingSession->endSession());
+                
+                // Mark as complete - muxing will happen after encoder closes files
+                dualPassContext->state = DualPassState::PASS2_COMPLETE;
+            }
+            else {
+                // Normal mode or other states - finalize encoder
+                LOG(LL_NFO, "Finalizing encoder (normal mode or non-Pass 1)");
+                LOG_CALL(LL_DBG, encodingSession->finishAudio());
+                LOG_CALL(LL_DBG, encodingSession->finishVideo());
+                LOG_CALL(LL_DBG, encodingSession->endSession());
+                
+                if (dualPassContext) {
+                    LOG(LL_NFO, "Not triggering Pass 2 - state check failed");
+                    LOG(LL_NFO, "  Current state:", static_cast<int>(dualPassContext->state));
+                }
+            }
         }
     } catch (std::exception& ex) {
         LOG(LL_ERR, ex.what());
+        
+        // Reset dual-pass context on error to prevent stale state
+        if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+            LOG(LL_ERR, "Resetting dual-pass context due to Finalize error");
+            dualPassContext->state = DualPassState::IDLE;
+            dualPassContext->audio_buffer.clear();
+            dualPassContext->audio_buffer.shrink_to_fit();
+            dualPassContext->saved_video_editor_interface = nullptr;
+            dualPassContext->saved_montage_ptr = nullptr;
+        }
     }
 
     LOG_CALL(LL_DBG, encodingSession.reset());
     LOG_CALL(LL_DBG, ::exportContext.reset());
+    
+    // Check if Pass 2 just completed - single file output
+    if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
+        LOG(LL_NFO, "DUAL-PASS RENDERING COMPLETE!");
+        LOG(LL_NFO, "  Final output: ", dualPassContext->final_output_file);
+        LOG(LL_NFO, "  Audio from Pass 1 buffer: ", dualPassContext->audio_buffer.size(), " bytes");
+        LOG(LL_NFO, "  Video from Pass 2: Encoded directly to file");
+        LOG(LL_NFO, "  No muxing required - single MP4 output from Voukoder!");
+        
+        // Complete cleanup - reset ALL state for next render
+        LOG(LL_DBG, "Resetting dual-pass context for next render...");
+        dualPassContext->audio_buffer.clear();
+        dualPassContext->audio_buffer.shrink_to_fit();
+        dualPassContext->saved_video_editor_interface = nullptr;
+        dualPassContext->saved_montage_ptr = nullptr;
+        dualPassContext->original_fps = {0, 0};
+        dualPassContext->original_motion_blur_samples = 0;
+        dualPassContext->timestamp.clear();
+        dualPassContext->final_output_file.clear();
+        dualPassContext->audio_sample_rate = 48000;
+        dualPassContext->audio_channels = 2;
+        dualPassContext->audio_bits_per_sample = 16;
+        dualPassContext->audio_block_align = 4;
+        dualPassContext->audio_buffer_playback_position = 0;
+        dualPassContext->state = DualPassState::IDLE;
+        
+        LOG(LL_NFO, "Dual-pass context fully reset - ready for next render");
+    }
+    
     POST();
     return S_OK;
 }
@@ -1308,6 +1613,67 @@ HANDLE GameHooks::CreateThread::Implementation(void* pFunc, void* pParams, int32
     return result;
 }
 
+bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, void* montage) {
+    PRE();
+    
+    LOG(LL_NFO, "StartBakeProject called");
+    LOG(LL_DBG, "  videoEditorInterface:", videoEditorInterface);
+    LOG(LL_DBG, "  montage:", montage);
+    
+    // Check if this is Pass 2 (auto-triggered) or a new export
+    if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
+        // This is Pass 2 - auto-triggered for video
+        LOG(LL_NFO, "PASS 2 START - Auto-triggered video export");
+        LOG(LL_NFO, "  Current state:", static_cast<int>(dualPassContext->state), " (PASS2_RUNNING)");
+    } else {
+        // This is a new user-initiated export
+        // Check if dual-pass is needed based on effective frame rate
+        float gameFrameRate = (static_cast<float>(config::fps.first) * 
+                              (static_cast<float>(config::motion_blur_samples) + 1) / 
+                              static_cast<float>(config::fps.second));
+        
+        LOG(LL_NFO, "User-initiated export - effective frame rate: ", gameFrameRate, " FPS");
+        
+        if (gameFrameRate > 60.0f) {
+            // High frame rate - activate dual-pass mode
+            LOG(LL_NFO, "High frame rate detected - activating DUAL-PASS mode");
+            
+            // Initialize dual-pass context
+            if (!dualPassContext) {
+                dualPassContext.reset(new DualPassContext());
+            }
+            
+            // This is Pass 1 - save settings and pointers
+            dualPassContext->state = DualPassState::PASS1_RUNNING;
+            dualPassContext->original_fps = config::fps;
+            dualPassContext->original_motion_blur_samples = config::motion_blur_samples;
+            dualPassContext->saved_video_editor_interface = videoEditorInterface;
+            dualPassContext->saved_montage_ptr = montage;
+            
+            LOG(LL_NFO, "  PASS 1 will capture audio at 30 FPS, 0 motion blur");
+            LOG(LL_NFO, "  PASS 2 will capture video at ", config::fps.first, "/", config::fps.second, 
+                       " FPS, ", config::motion_blur_samples, " motion blur samples");
+            LOG(LL_DBG, "  Saved pointers - interface:", videoEditorInterface, " montage:", montage);
+        } else {
+            // Normal frame rate - no dual-pass needed
+            LOG(LL_DBG, "Normal frame rate - single-pass export");
+            
+            // Ensure dual-pass is not active from previous render
+            if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+                LOG(LL_WRN, "Dual-pass context was not IDLE - resetting");
+                dualPassContext->state = DualPassState::IDLE;
+            }
+        }
+    }
+    
+    // Call original function - game handles output path
+    bool result = GameHooks::StartBakeProject::OriginalFunc(videoEditorInterface, montage);
+    LOG(LL_DBG, "StartBakeProject original returned:", result);
+    POST();
+    return result;
+}
+
+
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
     PRE();
     const std::pair<int32_t, int32_t> fps = config::fps;
@@ -1330,6 +1696,41 @@ void CreateNewExportContext() {
     NOT_NULL(encodingSession, "Could not create the session");
     ::exportContext.reset(new ExportContext());
     NOT_NULL(::exportContext, "Could not create export context");
+    
+    // Handle dual-pass overrides - must be set AFTER config reload
+    LOG(LL_NFO, "CreateNewExportContext called");
+    if (dualPassContext) {
+        LOG(LL_NFO, "  dualPassContext exists, state =", static_cast<int>(dualPassContext->state));
+        if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
+            // Override config for Pass 1: 30 FPS, 0 motion blur
+            LOG(LL_NFO, "  PASS 1 DETECTED - Overriding config for audio capture");
+            LOG(LL_NFO, "    Before: fps=", config::fps.first, "/", config::fps.second, 
+                        " motion_blur=", config::motion_blur_samples);
+            config::fps = std::make_pair(30, 1);
+            config::motion_blur_samples = 0;
+            LOG(LL_NFO, "    After: fps=30/1 motion_blur=0");
+            
+            ::exportContext->is_audio_export_disabled = false;
+            LOG(LL_NFO, "  Audio ENABLED for Pass 1");
+        } else if (dualPassContext->state == DualPassState::PASS2_PENDING || 
+                   dualPassContext->state == DualPassState::PASS2_RUNNING) {
+            // Restore original user settings for Pass 2 (video capture)
+            LOG(LL_NFO, "  PASS 2 DETECTED - Restoring user settings for video capture");
+            LOG(LL_NFO, "    Restoring: fps=", dualPassContext->original_fps.first, "/", 
+                        dualPassContext->original_fps.second, " motion_blur=", 
+                        dualPassContext->original_motion_blur_samples);
+            config::fps = dualPassContext->original_fps;
+            config::motion_blur_samples = dualPassContext->original_motion_blur_samples;
+            
+            // Keep audio ENABLED so WriteSample hook can replay buffered audio
+            ::exportContext->is_audio_export_disabled = false;
+            LOG(LL_NFO, "  Audio ENABLED for Pass 2 (replaying buffered audio)");
+        } else {
+            LOG(LL_NFO, "  State is neither PASS1 nor PASS2");
+        }
+    } else {
+        LOG(LL_NFO, "  dualPassContext is NULL");
+    }
 }
 
 void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint32_t r8d, uint32_t width,
@@ -1352,7 +1753,7 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
         }
     }
 
-    LOG(LL_DBG, "CreateTexture:", " rcx:", rcx, " name ptr:", static_cast<const void*>(name),
+    LOG(LL_TRC, "CreateTexture:", " rcx:", rcx, " name ptr:", static_cast<const void*>(name),
         " name:", SafeAnsiString(name), " r8d:", Logger::hex(r8d, 8),
         " width:", width, " height:", height, " fmt:", conv_dxgi_format_to_string(fmt), " result:", result,
         " *r+0:", vresult ? *(vresult + 0) : "<NULL>", " *r+1:", vresult ? *(vresult + 1) : "<NULL>",

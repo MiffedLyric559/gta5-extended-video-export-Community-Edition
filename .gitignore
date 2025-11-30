@@ -51,3 +51,8 @@ packages/
 # cmake
 /out
 /voukoder
+
+/vcpkg
+/vcpkg_installed
+/reshade
+/build

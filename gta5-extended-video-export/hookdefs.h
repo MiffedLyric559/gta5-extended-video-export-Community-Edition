@@ -120,3 +120,11 @@ DEFINE_X64_HOOK(CreateExportContext, uint8_t, //
                 uint32_t width,               //
                 uint32_t height,              //
                 void* r9d);                   //
+
+// Dual-pass audio rendering hooks
+// IsPendingPendingBakeStart is too small to hook (11 bytes), so we call it directly as a function pointer
+using IsPendingPendingBakeStartFunc = bool(*)();
+
+DEFINE_X64_HOOK(StartBakeProject, bool,      //
+                void* video_editor_interface, // this pointer (RCX)
+                void* montage);               // CReplayMontage* (RDX)

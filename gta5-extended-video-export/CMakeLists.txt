@@ -225,5 +225,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${VOUKODER_INCLUDE_DIR})
 # D3D11
 target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib)
 
+# Media Foundation
+target_link_libraries(${PROJECT_NAME} PRIVATE mfreadwrite.lib mfplat.lib mfuuid.lib)
+
 # USER32
 target_link_libraries(${PROJECT_NAME} PRIVATE user32.lib)
