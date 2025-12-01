@@ -10,6 +10,8 @@
 #include <INIReader.h>
 #include <ShlObj.h>
 #include <algorithm>
+#include <cmath>
+#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <regex>
@@ -73,6 +75,59 @@ class config {
         disable_watermark = parse_disable_watermark();
 
         readEncoderConfig();
+    }
+
+    static void save() {
+        try {
+            const std::string ini_path = AsiPath() + "\\" INI_FILE_NAME;
+            std::ofstream ini_file(ini_path, std::ios::trunc);
+            
+            if (!ini_file.is_open()) {
+                LOG(LL_ERR, "Failed to open INI file for writing: ", ini_path);
+                return;
+            }
+            
+            // Write main settings
+            ini_file << "enable_mod = " << (is_mod_enabled ? "true" : "false") << "\n";
+            ini_file << "auto_reload_config = " << (auto_reload_config ? "true" : "false") << "\n";
+            ini_file << "output_folder = " << output_dir << "\n";
+            
+            // Write log level
+            std::string log_level_str;
+            switch (log_level) {
+                case LL_ERR: log_level_str = "error"; break;
+                case LL_WRN: log_level_str = "warn"; break;
+                case LL_NFO: log_level_str = "info"; break;
+                case LL_DBG: log_level_str = "debug"; break;
+                case LL_TRC: log_level_str = "trace"; break;
+                default: log_level_str = "error"; break;
+            }
+            ini_file << "log_level = " << log_level_str << "\n";
+            
+            // Write export section
+            ini_file << "\n[EXPORT]\n";
+            
+            // Write FPS
+            float fps_value = static_cast<float>(fps.first) / static_cast<float>(fps.second);
+            int fps_int = static_cast<int>(fps_value + 0.5f);
+            
+            if (std::abs(fps_value - fps_int) < 0.01f) {
+                ini_file << "fps = " << fps_int << "\n";
+            } else {
+                ini_file << "fps = " << fps.first << "/" << fps.second << "\n";
+            }
+            
+            ini_file << "motion_blur_samples = " << static_cast<int>(motion_blur_samples) << "\n";
+            ini_file << "motion_blur_strength = " << motion_blur_strength << "\n";
+            ini_file << "export_openexr = " << (export_openexr ? "true" : "false") << "\n";
+            ini_file << "disable_watermark = " << (disable_watermark ? "true" : "false") << "\n";
+            
+            ini_file.close();
+            
+            LOG(LL_NFO, "Configuration saved to INI file");
+        } catch (const std::exception& ex) {
+            LOG(LL_ERR, "Failed to save configuration: ", ex.what());
+        }
     }
 
     static void readEncoderConfig() {

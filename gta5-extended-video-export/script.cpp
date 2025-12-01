@@ -1533,6 +1533,12 @@ void eve::finalize() {
     POST();
 }
 
+bool eve::isExportActive() {
+    // Check if an export session is currently active
+    std::lock_guard<std::mutex> lock(mxSession);
+    return encodingSession != nullptr && encodingSession->isCapturing;
+}
+
 void ID3D11DeviceContextHooks::Draw::Implementation(ID3D11DeviceContext* pThis, //
                                                     UINT VertexCount,           //
                                                     UINT StartVertexLocation) {
