@@ -274,10 +274,14 @@ HRESULT Session::finishVideo() {
             thread_exr_encoder.join();
         }
 
-        delete videoFrame.buffer;
-        videoFrame.buffer = nullptr;
-        delete videoFrame.rowsize;
-        videoFrame.rowsize = nullptr;
+        if (videoFrame.buffer != nullptr) {
+            delete videoFrame.buffer;
+            videoFrame.buffer = nullptr;
+        }
+        if (videoFrame.rowsize != nullptr) {
+            delete videoFrame.rowsize;
+            videoFrame.rowsize = nullptr;
+        }
 
         this->isVideoFinished = true;
     }
@@ -291,8 +295,10 @@ HRESULT Session::finishAudio() {
     std::lock_guard<std::mutex> guard(this->mxFinish);
 
     if (!this->isAudioFinished) {
-        delete this->audioChunk.buffer;
-        this->audioChunk.buffer = nullptr;
+        if (this->audioChunk.buffer != nullptr) {
+            delete this->audioChunk.buffer;
+            this->audioChunk.buffer = nullptr;
+        }
     }
 
     this->isAudioFinished = true;
@@ -319,7 +325,11 @@ HRESULT Session::endSession() {
     this->isCapturing = false;
     LOG(LL_NFO, "Ending session...");
 
-    LOG_IF_FAILED(pVoukoder->Close(true), "Failed to close Voukoder context.");
+    if (pVoukoder) {
+        LOG_IF_FAILED(pVoukoder->Close(true), "Failed to close Voukoder context.");
+    } else {
+        LOG(LL_DBG, "Voukoder context was never created (audio-only mode)");
+    }
 
     this->isSessionFinished = true;
     this->cvEndSession.notify_all();

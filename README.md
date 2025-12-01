@@ -3,6 +3,9 @@
 ## STATUS: Development has started and we are working on getting a stable first version available. Watch this repo for updates but please understand that it will take time as we are doing this in our free time and as a hobby based project.
 
 
+# NOTE:
+Currently there are some issues with the build script, this will be fixed in a few days.
+
 
 > Reviving and improving the ultimate cinematic export tool for GTA V’s Rockstar Editor.
 

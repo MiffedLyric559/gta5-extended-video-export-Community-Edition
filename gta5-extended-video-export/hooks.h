@@ -8,6 +8,30 @@
 #include <polyhook2/PE/IatHook.hpp>
 #include <polyhook2/Virtuals/VFuncSwapHook.hpp>
 #include <polyhook2/ZydisDisassembler.hpp>
+#include <eh.h>
+
+class SehException : public std::exception {
+    public:
+        explicit SehException(unsigned int code) : code(code) {}
+        const char* what() const noexcept override { return "SEH exception"; }
+        unsigned int getCode() const noexcept { return code; }
+
+    private:
+        unsigned int code;
+};
+
+inline void __cdecl SehTranslator(unsigned int code, EXCEPTION_POINTERS*) {
+        throw SehException(code);
+}
+
+class SehTranslatorGuard {
+    public:
+        explicit SehTranslatorGuard(_se_translator_function translator) : previous(_set_se_translator(translator)) {}
+        ~SehTranslatorGuard() { _set_se_translator(previous); }
+
+    private:
+        _se_translator_function previous;
+};
 
 struct MemberHookInfoStruct {
     explicit MemberHookInfoStruct(const uint16_t index) : index(index) {}
@@ -81,7 +105,8 @@ HRESULT hookNamedExportFunction(const std::wstring& dllName, const std::string& 
 
 template <class FUNC_TYPE>
 HRESULT hookX64Function(uint64_t func, void* hookFunc, FUNC_TYPE* originalFunc,
-                        std::shared_ptr<PLH::x64Detour>& x64Detour) {
+                        std::shared_ptr<PLH::x64Detour>& x64Detour,
+                        PLH::x64Detour::detour_scheme_t scheme = PLH::x64Detour::detour_scheme_t::RECOMMENDED) {
     if (x64Detour.get() != nullptr) {
         return S_OK;
     }
@@ -90,8 +115,20 @@ HRESULT hookX64Function(uint64_t func, void* hookFunc, FUNC_TYPE* originalFunc,
 
     const auto newHook =
         new PLH::x64Detour(func, reinterpret_cast<uint64_t>(hookFunc), reinterpret_cast<uint64_t*>(originalFunc));
+    newHook->setDetourScheme(scheme);
 
-    if (!newHook->hook()) {
+    bool hookSucceeded = false;
+    SehTranslatorGuard translatorGuard(&SehTranslator);
+    try {
+        hookSucceeded = newHook->hook();
+    } catch (const SehException& ex) {
+        LOG(LL_ERR, "SEH while installing x64 detour at", Logger::hex(func, 16),
+            ": code = ", Logger::hex(ex.getCode(), 8));
+    } catch (const std::exception& ex) {
+        LOG(LL_ERR, "Exception while installing x64 detour at", Logger::hex(func, 16), ": ", ex.what());
+    }
+
+    if (!hookSucceeded) {
         *originalFunc = nullptr;
         delete newHook;
         LOG(LL_ERR, "Failed to hook x64 function.");
@@ -129,6 +166,7 @@ HRESULT hookX64Function(uint64_t func, void* hookFunc, FUNC_TYPE* originalFunc,
         typedef RETURN_TYPE (*##Type)(__VA_ARGS__);                                                                    \
         Type OriginalFunc = nullptr;                                                                                   \
         std::shared_ptr<PLH::EatHook> Hook;                                                                            \
+        std::shared_ptr<PLH::x64Detour> Detour;                                                                        \
         }                                                                                                              \
     }
 
@@ -160,4 +198,9 @@ HRESULT hookX64Function(uint64_t func, void* hookFunc, FUNC_TYPE* originalFunc,
 #define PERFORM_X64_HOOK_REQUIRED(FUNCTION_NAME, ADDRESS)                                                              \
     REQUIRE(hookX64Function(ADDRESS, GameHooks::FUNCTION_NAME::Implementation,                                         \
                             &GameHooks::FUNCTION_NAME::OriginalFunc, GameHooks::FUNCTION_NAME::Hook),                  \
+            "Failed to hook " #FUNCTION_NAME)
+
+#define PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(FUNCTION_NAME, ADDRESS, SCHEME)                                           \
+    REQUIRE(hookX64Function(ADDRESS, GameHooks::FUNCTION_NAME::Implementation,                                         \
+                            &GameHooks::FUNCTION_NAME::OriginalFunc, GameHooks::FUNCTION_NAME::Hook, SCHEME),          \
             "Failed to hook " #FUNCTION_NAME)

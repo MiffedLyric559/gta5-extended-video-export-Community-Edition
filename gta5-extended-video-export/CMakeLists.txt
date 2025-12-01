@@ -152,6 +152,8 @@ target_link_options(${PROJECT_NAME} PRIVATE
         >
         $<$<CONFIG:Release>:
         /DELAYLOAD:OpenEXR-3_1.dll;
+        /MAPINFO:LINES;
+        "/MAP:$<TARGET_FILE_DIR:${PROJECT_NAME}>/ExtendedVideoExport_$<CONFIG>.map"
         >
         $<$<CONFIG:RelWithDebInfo>:
         /DELAYLOAD:OpenEXR-3_1.dll;
@@ -196,13 +198,13 @@ add_custom_command_if(
 # Shaders
 target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/shaders")
 
+# Reshade headers
+target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../reshade/include")
+target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../reshade/deps/imgui")
+
 # ScriptHookV
 find_library(SCRIPT_HOOK_V_LIBRARY ScriptHookV REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../ScriptHookV/lib")
 target_link_libraries(${PROJECT_NAME} PRIVATE ${SCRIPT_HOOK_V_LIBRARY})
-
-# reshade
-find_path(RESHADE_INCLUDE_DIR reshade.hpp REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../reshade/include")
-target_include_directories(${PROJECT_NAME} PRIVATE ${RESHADE_INCLUDE_DIR})
 
 # inih
 find_path(INIH_INCLUDE_DIR ini.h REQUIRED)
@@ -224,6 +226,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE OpenEXR::OpenEXR)
 find_path(VOUKODER_INCLUDE_DIR VoukoderTypeLib_h.h REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../voukoder")
 target_include_directories(${PROJECT_NAME} PRIVATE ${VOUKODER_INCLUDE_DIR})
 
-# DirectXTex
-find_package(directxtex CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE Microsoft::DirectXTex)
+# D3D11
+target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib)
+
+# Media Foundation
+target_link_libraries(${PROJECT_NAME} PRIVATE mfreadwrite.lib mfplat.lib mfuuid.lib)
+
+# USER32
+target_link_libraries(${PROJECT_NAME} PRIVATE user32.lib)
