@@ -56,3 +56,4 @@ packages/
 /vcpkg_installed
 /reshade
 /build
+/Builds
