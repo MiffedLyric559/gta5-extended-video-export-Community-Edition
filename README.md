@@ -74,6 +74,8 @@ The project focuses on the following core objectives:
 
 Installing **EVER** is just as easy as before:
 
+**Required:** You need to have Voukoder installed in order for the plugin to work, you can grab the installation file from: [here](https://web.archive.org/web/20241216004346/https://github.com/Vouk/voukoder/releases/tag/13.4.1).
+
 #### For GTA V:
 
 1. Download the latest release from the [releases page](https://github.com/MiffedLyric559/gta5-extended-video-export-Community-Edition/releases)
@@ -149,7 +151,11 @@ Once the Rockstar Editor is done, the second pass will automatically start and y
    git submodule update --init --recursive
    ```
 
-3. Run the build script:
+3. Download the ScriptHookV SDK from [here](http://www.dev-c.com/gtav/scripthookv/) and unzip into: `ScriptHookV` inside the main repository folder.
+
+4. Download the Voukoder from [here](https://web.archive.org/web/20241216004346/https://github.com/Vouk/voukoder) (Wayback Machine) and unzip the archive and copy the contents of the `Voukoder` into a folder named: `voukoder` inside the main repository folder.
+
+5. Run the build script:
    ```bash
    build.bat
    ```
