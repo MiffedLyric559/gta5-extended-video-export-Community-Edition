@@ -1,4 +1,4 @@
-set(PROJECT_NAME gta5-extended-video-export-config)
+set(PROJECT_NAME EVER-config)
 
 ################################################################################
 # Source groups
@@ -9,7 +9,7 @@ set(PROJECT_NAME gta5-extended-video-export-config)
 # source_group("Header Files" FILES ${Header_Files})
 
 set(Source_Files
-    "gta5-extended-video-export-config.cpp"
+    "ever-config.cpp"
 )
 
 set(VK_Source_Files
@@ -29,7 +29,7 @@ set(ALL_FILES
 add_executable(${PROJECT_NAME} WIN32 ${ALL_FILES})
 
 use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
-set(ROOT_NAMESPACE gta5extendedvideoexportconfig)
+set(ROOT_NAMESPACE EVER-config)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     VS_GLOBAL_KEYWORD "Win32Proj"
@@ -99,10 +99,10 @@ add_custom_command_if(
         TARGET ${PROJECT_NAME}
         POST_BUILD
         COMMANDS
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\gta5-extended-video-export-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\EncoderConfig.exe"
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\gta5-extended-video-export-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\EncoderConfig.pdb"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\gta5-extended-video-export-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\EncoderConfig.exe"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\gta5-extended-video-export-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\EncoderConfig.pdb"
+        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.exe"
+        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.pdb"
+        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.exe" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.exe"
+        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\EVER-config.pdb" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\EncoderConfig.pdb"
 )
 
 ### Imports 

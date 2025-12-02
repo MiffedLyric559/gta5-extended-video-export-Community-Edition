@@ -526,7 +526,7 @@ bool ensureD3D11Hook(bool allowLoadLibrary = true) {
 
 } // namespace
 
-void eve::OnPresent(IDXGISwapChain* p_swap_chain) {
+void ever::OnPresent(IDXGISwapChain* p_swap_chain) {
 
     // For some unknown reason, we need this lock to prevent black exports
     captureMainSwapChain(p_swap_chain, "IDXGISwapChain::Present");
@@ -610,7 +610,7 @@ HRESULT ExportHooks::D3D11CreateDeviceAndSwapChain::Implementation(
                     "Failed to get IDXGIFactory");
             installFactoryHooks(localFactory.Get());
 
-            eve::prepareDeferredContext(*pp_device, *pp_immediate_context);
+            ever::prepareDeferredContext(*pp_device, *pp_immediate_context);
         } catch (std::exception& ex) {
             LOG(LL_ERR, ex.what());
         } catch (...) {
@@ -704,14 +704,14 @@ HRESULT IDXGISwapChainHooks::Present::Implementation(IDXGISwapChain* pThis, UINT
         if (Flags & DXGI_PRESENT_TEST) {
             LOG(LL_TRC, "DXGI_PRESENT_TEST!");
         } else {
-            eve::OnPresent(pThis);
+            ever::OnPresent(pThis);
         }
     }
 
     return OriginalFunc(pThis, SyncInterval, Flags);
 }
 
-void eve::initialize() {
+void ever::initialize() {
     PRE();
 
     try {
@@ -818,7 +818,7 @@ void eve::initialize() {
     POST();
 }
 
-void eve::ScriptMain() {
+void ever::ScriptMain() {
     PRE();
     LOG(LL_NFO, "Starting main loop");
     while (true) {
@@ -977,12 +977,12 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                     static_cast<float>(config::motion_blur_samples);
 
                 if (current_shutter_position >= (1 - config::motion_blur_strength)) {
-                    eve::drawAdditive(pDevice, p_this, pSwapChainBuffer);
+                    ever::drawAdditive(pDevice, p_this, pSwapChainBuffer);
                 }
             } else {
                 // Trick to use the same buffers for when not using motion blur
                 ::exportContext->acc_count = 0;
-                eve::drawAdditive(pDevice, p_this, pSwapChainBuffer);
+                ever::drawAdditive(pDevice, p_this, pSwapChainBuffer);
                 ::exportContext->acc_count = 1;
                 ::exportContext->total_frame_num = 1;
             }
@@ -990,7 +990,7 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
             if ((::exportContext->total_frame_num % (::config::motion_blur_samples + 1)) ==
                 config::motion_blur_samples) {
 
-                const ComPtr<ID3D11Texture2D> result = eve::divideBuffer(pDevice, p_this, ::exportContext->acc_count);
+                const ComPtr<ID3D11Texture2D> result = ever::divideBuffer(pDevice, p_this, ::exportContext->acc_count);
                 ::exportContext->acc_count = 0;
 
                 D3D11_MAPPED_SUBRESOURCE mapped;
@@ -1528,12 +1528,12 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
     return S_OK;
 }
 
-void eve::finalize() {
+void ever::finalize() {
     PRE();
     POST();
 }
 
-bool eve::isExportActive() {
+bool ever::isExportActive() {
     // Check if an export session is currently active
     std::lock_guard<std::mutex> lock(mxSession);
     return encodingSession != nullptr && encodingSession->isCapturing;
@@ -1919,7 +1919,7 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
     return result;
 }
 
-void eve::prepareDeferredContext(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext) {
+void ever::prepareDeferredContext(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext) {
     REQUIRE(pDevice->CreateDeferredContext(0, pDContext.GetAddressOf()), "Failed to create deferred context");
     REQUIRE(pDevice->CreateVertexShader(VSFullScreen::g_main, sizeof(VSFullScreen::g_main), NULL,
                                         pVsFullScreen.GetAddressOf()),
@@ -1984,7 +1984,7 @@ void eve::prepareDeferredContext(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11Devi
             "Failed to create accumulation blend state");
 }
 
-void eve::drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
+void ever::drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
                        ComPtr<ID3D11Texture2D> pSource) {
     D3D11_TEXTURE2D_DESC desc;
     pSource->GetDesc(&desc);
@@ -2030,7 +2030,7 @@ void eve::drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext>
     ::exportContext->acc_count++;
 }
 
-ComPtr<ID3D11Texture2D> eve::divideBuffer(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
+ComPtr<ID3D11Texture2D> ever::divideBuffer(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
                                           uint32_t k) {
 
     D3D11_TEXTURE2D_DESC desc;

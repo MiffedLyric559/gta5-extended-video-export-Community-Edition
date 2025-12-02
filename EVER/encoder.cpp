@@ -58,7 +58,7 @@ HRESULT Session::createContext(const VKENCODERCONFIG& config, const std::wstring
     REQUIRE(m_pVoukoder->SetConfig(config), "Failed to set Voukoder config");
 
     VKENCODERINFO vkInfo{
-        .application = L"Extended Video Export",
+        .application = L"Extended Video Export Revived",
         .video{
             .enabled = true,
             .width = static_cast<int>(in_width),

@@ -4,12 +4,14 @@ set(CMAKE_SYSTEM_VERSION 10.0 CACHE STRING "" FORCE)
 
 set(VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg")
 set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg triplet")
+set(VCPKG_PLATFORM_TOOLSET "v142" CACHE STRING "Platform toolset")
+set(CMAKE_GENERATOR_TOOLSET "v142" CACHE STRING "Generator toolset")  
 set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake"
         CACHE STRING "vcpkg toolchain file")
 
 set(CMAKE_CXX_STANDARD 20)
 
-project(gta5-extended-video-export C CXX)
+project(EVER C CXX)
 
 ################################################################################
 # Set target arch type if empty. Visual studio solution generator provides it.
@@ -105,7 +107,6 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 ################################################################################
 # Sub-projects
 ################################################################################
-add_subdirectory(gta5-extended-video-export)
-add_subdirectory(gta5-extended-video-export-config)
-# add_subdirectory(gta5-extended-video-export-test)
+add_subdirectory(EVER)
+add_subdirectory(EVER-config)
 

@@ -12,7 +12,7 @@
 #include <imgui.h>
 #include <reshade.hpp>
 
-namespace eve {
+namespace ever {
     bool isExportActive();
 }
 
@@ -24,7 +24,7 @@ static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool 
     g_current_runtime = runtime;
     
     // If export is active, prevent overlay from opening
-    if (eve::isExportActive() && open) {
+    if (ever::isExportActive() && open) {
         return true;
     }
     
@@ -54,9 +54,9 @@ class PolyHookLogger : public PLH::Logger {
 // ImGui settings overlay for Reshade
 static void draw_eve_settings(reshade::api::effect_runtime *runtime)
 {
-    const bool is_rendering = eve::isExportActive();
+    const bool is_rendering = ever::isExportActive();
     
-    ImGui::TextUnformatted("EVE - Extended Video Export Settings");
+    ImGui::TextUnformatted("EVER - Extended Video Export Revived");
     ImGui::Separator();
     
     if (is_rendering) {
@@ -73,7 +73,7 @@ static void draw_eve_settings(reshade::api::effect_runtime *runtime)
         config::save();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Enable or disable the Extended Video Export mod");
+        ImGui::SetTooltip("Enable or disable the EVER mod");
     
     ImGui::Spacing();
     ImGui::TextUnformatted("Export Settings");
@@ -188,40 +188,64 @@ static void draw_eve_settings(reshade::api::effect_runtime *runtime)
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
-        LOG(LL_NON, std::filesystem::current_path());
-        SetDllDirectoryW(utf8_decode(AsiPath() + R"(\EVE\dlls\)").c_str());
-        LOG(LL_DBG, "Initializing PolyHook logger");
-        PLH::Log::registerLogger(std::make_unique<PolyHookLogger>());
-        
-        // Register with Reshade
-        if (reshade::register_addon(hModule)) {
-            LOG(LL_NON, "Successfully registered with Reshade!");
-            // Register settings overlay
-            reshade::register_overlay(nullptr, draw_eve_settings);
-            // Register event to block overlay during export
-            reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
-        } else {
-            LOG(LL_ERR, "Failed to register with Reshade! EVE requires Reshade to function.");
+        try {
+            LOG(LL_NON, std::filesystem::current_path());
+            
+            // Add DLL directory for dependencies
+            const std::wstring dll_path = utf8_decode(AsiPath() + R"(\EVER\dlls\)");
+            if (!SetDllDirectoryW(dll_path.c_str())) {
+                const DWORD err = ::GetLastError();
+                LOG(LL_ERR, "Failed to set DLL directory:", err);
+                return FALSE;
+            }
+            LOG(LL_DBG, "DLL directory set to: ", AsiPath() + R"(\EVER\dlls\)");
+            
+            LOG(LL_DBG, "Initializing PolyHook logger");
+            PLH::Log::registerLogger(std::make_unique<PolyHookLogger>());
+            
+            // Register with Reshade
+            if (reshade::register_addon(hModule)) {
+                LOG(LL_NON, "Successfully registered with Reshade!");
+                // Register settings overlay
+                reshade::register_overlay(nullptr, draw_eve_settings);
+                // Register event to block overlay during export
+                reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
+            } else {
+                LOG(LL_ERR, "Failed to register with Reshade! EVE requires Reshade to function.");
+                return FALSE;
+            }
+            
+            config::reload();
+            if (!config::is_mod_enabled) {
+                LOG(LL_NON, "Extended Video Export mod is disabled in the config file. Exiting...");
+                return TRUE;
+            } else {
+                LOG(LL_NON, "Extended Video Export mod is enabled. Initializing...");
+            }
+            Logger::instance().level = config::log_level;
+            LOG_CALL(LL_DBG, ever::initialize());
+            LOG(LL_NFO, "Registering script...");
+            LOG_CALL(LL_DBG, scriptRegister(hModule, ever::ScriptMain));
+        }
+        catch (const std::exception& e) {
+            LOG(LL_ERR, "C++ exception during DLL initialization:", e.what());
             return FALSE;
         }
-        
-        config::reload();
-        if (!config::is_mod_enabled) {
-            LOG(LL_NON, "Extended Video Export mod is disabled in the config file. Exiting...");
-            return TRUE;
-        } else {
-            LOG(LL_NON, "Extended Video Export mod is enabled. Initializing...");
+        catch (...) {
+            LOG(LL_ERR, "Unknown exception during DLL initialization!");
+            return FALSE;
         }
-        Logger::instance().level = config::log_level;
-        LOG_CALL(LL_DBG, eve::initialize());
-        LOG(LL_NFO, "Registering script...");
-        LOG_CALL(LL_DBG, scriptRegister(hModule, eve::ScriptMain));
         break;
     case DLL_PROCESS_DETACH:
-        LOG(LL_NFO, "Unregistering DXGI callback");
-        LOG_CALL(LL_DBG, scriptUnregister(hModule));
-        LOG_CALL(LL_DBG, eve::finalize());
-        reshade::unregister_addon(hModule);
+        try {
+            LOG(LL_NFO, "Unregistering DXGI callback");
+            LOG_CALL(LL_DBG, scriptUnregister(hModule));
+            LOG_CALL(LL_DBG, ever::finalize());
+            reshade::unregister_addon(hModule);
+        }
+        catch (...) {
+            // Silent cleanup failure
+        }
         break;
     }
     return TRUE;

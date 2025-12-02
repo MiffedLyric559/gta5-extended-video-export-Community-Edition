@@ -26,7 +26,7 @@ template <class B, class A> B ForceCast(A a) {
     return x.b;
 }
 
-namespace eve {
+namespace ever {
 void initialize();
 void ScriptMain();
 void OnPresent(IDXGISwapChain* p_swap_chain);
@@ -37,4 +37,4 @@ static ComPtr<ID3D11Texture2D> divideBuffer(ComPtr<ID3D11Device> pDevice, ComPtr
                                             uint32_t k);
 static void drawAdditive(ComPtr<ID3D11Device> pDevice, ComPtr<ID3D11DeviceContext> pContext,
                          ComPtr<ID3D11Texture2D> pSource);
-} // namespace eve
+} // namespace ever

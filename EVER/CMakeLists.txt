@@ -1,4 +1,4 @@
-set(PROJECT_NAME gta5-extended-video-export)
+set(PROJECT_NAME EVER)
 
 ################################################################################
 # Resource fix
@@ -56,7 +56,7 @@ set(ALL_FILES
 add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
 
 use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
-set(ROOT_NAMESPACE gta5-extended-video-export)
+set(ROOT_NAMESPACE EVER)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
         VS_GLOBAL_KEYWORD "Win32Proj"
@@ -66,10 +66,10 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 # Target name
 ################################################################################
 set_target_properties(${PROJECT_NAME} PROPERTIES
-        TARGET_NAME_DEBUG "ExtendedVideoExport"
-        TARGET_NAME_MINSIZEREL "ExtendedVideoExport"
-        TARGET_NAME_RELEASE "ExtendedVideoExport"
-        TARGET_NAME_RELWITHDEBINFO "ExtendedVideoExport"
+        TARGET_NAME_DEBUG "EVER"
+        TARGET_NAME_MINSIZEREL "EVER"
+        TARGET_NAME_RELEASE "EVER"
+        TARGET_NAME_RELWITHDEBINFO "EVER"
         SUFFIX ".asi"
         )
 
@@ -122,7 +122,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
         ">"
         "_WINDOWS;"
         "_USRDLL;"
-        "GTA5EXTENDEDVIDEOEXPORT_EXPORTS;"
+        "EVER_EXPORTS;"
         "TARGET_NAME=\"${TARGET_NAME}\";"
         "_CRT_SECURE_NO_WARNINGS;"
         "_WIN32_WINNT=0x0601"
@@ -153,14 +153,13 @@ target_link_options(${PROJECT_NAME} PRIVATE
         $<$<CONFIG:Release>:
         /DELAYLOAD:OpenEXR-3_1.dll;
         /MAPINFO:LINES;
-        "/MAP:$<TARGET_FILE_DIR:${PROJECT_NAME}>/ExtendedVideoExport_$<CONFIG>.map"
+        "/MAP:$<TARGET_FILE_DIR:${PROJECT_NAME}>/EVER_$<CONFIG>.map"
         >
         $<$<CONFIG:RelWithDebInfo>:
         /DELAYLOAD:OpenEXR-3_1.dll;
         /DEBUG:FULL
         >
         /DELAYLOAD:PolyHook_2.dll;
-        /NODEFAULTLIB:libcmt.lib;
         /SUBSYSTEM:WINDOWS
         )
 
@@ -180,14 +179,14 @@ add_custom_command_if(
         POST_BUILD
         COMMANDS
         COMMAND $<CONFIG:Debug> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Debug> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls"
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls"
-        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVE"
+        COMMAND $<CONFIG:Debug> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
+        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
+        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVER"
         COMMAND $<CONFIG:MinSizeRel> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVE"
+        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVER"
         COMMAND $<CONFIG:Release> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVE\\dlls"
+        COMMAND $<CONFIG:Release> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
+        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
         COMMAND $<CONFIG:RelWithDebInfo> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
 )
 

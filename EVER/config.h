@@ -1,7 +1,7 @@
 #pragma once
 
-#ifndef _EVE_CONFIG_H_
-#define _EVE_CONFIG_H_
+#ifndef _EVER_CONFIG_H_
+#define _EVER_CONFIG_H_
 
 #include "VoukoderTypeLib_h.h"
 #include "logger.h"
@@ -45,8 +45,8 @@
 #define CFG_AUDIO_FMT "sample_format"
 #define CFG_AUDIO_CFG "options"
 
-#define INI_FILE_NAME "EVE\\" TARGET_NAME ".ini"
-#define PRESET_FILE_NAME "EVE\\preset.json"
+#define INI_FILE_NAME "EVER\\" TARGET_NAME ".ini"
+#define PRESET_FILE_NAME "EVER\\preset.json"
 
 class config {
   public:

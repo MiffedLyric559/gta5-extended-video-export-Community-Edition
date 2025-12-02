@@ -163,8 +163,8 @@ set "VSINSTALLDIR=%VSINSTALL%\"
 set "VCINSTALLDIR=%VSINSTALL%\VC\"
 echo Updated VSINSTALLDIR: %VSINSTALLDIR%
 set "VCPKG_VISUAL_STUDIO_PATH=%VSINSTALL%"
-set "VCPKG_PLATFORM_TOOLSET=v143"
-set "VCPKG_PLATFORM_TOOLSET_VERSION=14.43"
+set "VCPKG_PLATFORM_TOOLSET=v142"
+set "VCPKG_PLATFORM_TOOLSET_VERSION=14.29"
 vcpkg\vcpkg.exe install --triplet=x64-windows --vcpkg-root=vcpkg
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Failed to install vcpkg dependencies
@@ -178,7 +178,7 @@ if exist "build\CMakeCache.txt" (
     del /Q build\CMakeCache.txt 2>nul
     rmdir /S /Q build\CMakeFiles 2>nul
 )
-cmake -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake -T v143 -G "Visual Studio 17 2022"
+cmake -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake -T v142 -G "Visual Studio 17 2022"
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: CMake configuration failed
     exit /b 1
