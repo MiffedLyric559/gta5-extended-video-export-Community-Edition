@@ -12,37 +12,107 @@ endforeach()
 ################################################################################
 source_group("" FILES ${no_group_source_files})
 
-set(Header_Files
-        "config.h"
-        "encoder.h"
-        "logger.h"
-        "MFUtility.h"
-        "SafeQueue.h"
-        "script.h"
-        "stdafx.h"
-        "targetver.h"
-        "util.h"
-        "yara-helper.h"
-        "yara-patterns.h"
-        "hooks.h"
-        "hookdefs.h")
+# Core files
+set(Core_Header_Files
+        "src/core/script.h")
 
+set(Core_Source_Files
+        "src/core/dllmain.cpp"
+        "src/core/script.cpp")
+
+# Video encoding files
+set(Video_Header_Files
+        "src/video/EncoderSession.h"
+        "src/video/OpenEXRExporter.h"
+        "src/video/VideoFrameTypes.h")
+
+set(Video_Source_Files
+        "src/video/EncoderSession.cpp"
+        "src/video/OpenEXRExporter.cpp"
+        "src/video/VideoFrameTypes.cpp")
+
+# Hooking files
+set(Hooking_Header_Files
+        "src/hooking/HookUtility.h"
+        "src/hooking/MemberFunctionHook.h"
+        "src/hooking/ImportExportHook.h"
+        "src/hooking/X64Detour.h"
+        "src/hooking/PatternScanner.h"
+        "src/hooking/ScanPatterns.h"
+        "src/hooking/HookDefinitions.h")
+
+set(Hooking_Source_Files
+        "src/hooking/PatternScanner.cpp")
+
+# Config files
+set(Config_Header_Files
+        "src/config/ConfigConstants.h"
+        "src/config/Manager.h")
+
+set(Config_Source_Files
+        "src/config/Manager.cpp")
+
+# Utility files
+set(Utils_Header_Files
+        "src/utils/ConfigValueParser.h"
+        "src/utils/IniConfigReader.h"
+        "src/utils/JsonPresetReader.h"
+        "src/utils/logger.h"
+        "src/utils/SafeQueue.h"
+        "src/utils/util.h")
+
+set(Utils_Source_Files
+        "src/utils/logger.cpp"
+        "src/utils/util.cpp")
+
+# Rendering files
+set(Rendering_Header_Files
+        "src/rendering/MFUtility.h")
+
+# Include files
+set(Include_Files
+        "include/stdafx.h")
+
+# Resource files
+set(Resource_Files
+        "resources/resource.rc")
+
+# Combine all header files
+set(Header_Files
+        ${Core_Header_Files}
+        ${Video_Header_Files}
+        ${Hooking_Header_Files}
+        ${Config_Header_Files}
+        ${Utils_Header_Files}
+        ${Rendering_Header_Files}
+        ${Include_Files})
+
+# Combine all source files
 set(Source_Files
-        "config.cpp"
-        "dllmain.cpp"
-        "encoder.cpp"
-        "logger.cpp"
-        "script.cpp"
-        "yara-helper.cpp"
-        "resource.rc"
-        "util.cpp"
-        )
+        ${Core_Source_Files}
+        ${Video_Source_Files}
+        ${Hooking_Source_Files}
+        ${Config_Source_Files}
+        ${Utils_Source_Files}
+        ${Resource_Files})
 
 set(VK_Source_Files
         "../voukoder/VoukoderTypeLib_i.c")
 
-source_group("Header Files" FILES ${Header_Files})
-source_group("Source Files" FILES ${Source_Files} ${VK_Source_Files})
+source_group("Core\\Header Files" FILES ${Core_Header_Files})
+source_group("Core\\Source Files" FILES ${Core_Source_Files})
+source_group("Video\\Header Files" FILES ${Video_Header_Files})
+source_group("Video\\Source Files" FILES ${Video_Source_Files})
+source_group("Hooking\\Header Files" FILES ${Hooking_Header_Files})
+source_group("Hooking\\Source Files" FILES ${Hooking_Source_Files})
+source_group("Config\\Header Files" FILES ${Config_Header_Files})
+source_group("Config\\Source Files" FILES ${Config_Source_Files})
+source_group("Utils\\Header Files" FILES ${Utils_Header_Files})
+source_group("Utils\\Source Files" FILES ${Utils_Source_Files})
+source_group("Rendering\\Header Files" FILES ${Rendering_Header_Files})
+source_group("Include Files" FILES ${Include_Files})
+source_group("Resource Files" FILES ${Resource_Files})
+source_group("External\\Voukoder" FILES ${VK_Source_Files})
 
 set(ALL_FILES
         ${no_group_source_files}
@@ -193,6 +263,17 @@ add_custom_command_if(
 ################################################################################
 # Dependencies
 ################################################################################
+
+# Add project include directories
+target_include_directories(${PROJECT_NAME} PRIVATE 
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/video"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hooking"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/config"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/utils"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rendering"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 
 # Shaders
 target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/shaders")

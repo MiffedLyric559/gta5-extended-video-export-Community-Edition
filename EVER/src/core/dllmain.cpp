@@ -1,12 +1,12 @@
-#include "encoder.h"
+#include "stdafx.h"
+#include "EncoderSession.h"
 #include "logger.h"
 #include "script.h"
-#include "stdafx.h"
+#include "util.h"
 #include "polyhook2/ErrorLog.hpp"
 
 #include <filesystem>
 
-// Reshade and ImGui integration
 #define IMGUI_DISABLE_INCLUDE_IMCONFIG_H
 #define ImTextureID ImU64
 #include <imgui.h>
@@ -23,7 +23,6 @@ static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool 
 {
     g_current_runtime = runtime;
     
-    // If export is active, prevent overlay from opening
     if (ever::isExportActive() && open) {
         return true;
     }
@@ -51,7 +50,6 @@ class PolyHookLogger : public PLH::Logger {
     }
 };
 
-// ImGui settings overlay for Reshade
 static void draw_eve_settings(reshade::api::effect_runtime *runtime)
 {
     const bool is_rendering = ever::isExportActive();
@@ -68,9 +66,8 @@ static void draw_eve_settings(reshade::api::effect_runtime *runtime)
     
     ImGui::BeginDisabled(is_rendering);
     
-    // Enable/Disable Mod
-    if (ImGui::Checkbox("Enable Mod", &config::is_mod_enabled)) {
-        config::save();
+    if (ImGui::Checkbox("Enable Mod", &Config::Manager::is_mod_enabled)) {
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Enable or disable the EVER mod");
@@ -79,109 +76,102 @@ static void draw_eve_settings(reshade::api::effect_runtime *runtime)
     ImGui::TextUnformatted("Export Settings");
     ImGui::Separator();
     
-    // FPS Settings
-    float current_fps = static_cast<float>(config::fps.first) / static_cast<float>(config::fps.second);
+    float current_fps = static_cast<float>(Config::Manager::fps.first) / static_cast<float>(Config::Manager::fps.second);
     int fps_display = static_cast<int>(current_fps + 0.5f); // Round to nearest integer
     
     if (ImGui::InputInt("FPS", &fps_display, 1, 10)) {
         if (fps_display > 0 && fps_display <= 1000) {
-            config::fps.first = static_cast<uint32_t>(fps_display * 1000);
-            config::fps.second = 1000;
-            config::save();
+            Config::Manager::fps.first = static_cast<uint32_t>(fps_display * 1000);
+            Config::Manager::fps.second = 1000;
+            Config::Manager::save();
         }
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Frames per second for video export (e.g., 30, 60, 120)");
     
-    // Motion Blur Settings
     ImGui::Spacing();
-    int mb_samples = static_cast<int>(config::motion_blur_samples);
+    int mb_samples = static_cast<int>(Config::Manager::motion_blur_samples);
     if (ImGui::SliderInt("Motion Blur Samples", &mb_samples, 0, 255)) {
-        config::motion_blur_samples = static_cast<uint8_t>(mb_samples);
-        config::save();
+        Config::Manager::motion_blur_samples = static_cast<uint8_t>(mb_samples);
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Number of motion blur samples (0 = disabled, higher = smoother but slower)");
     
-    if (ImGui::SliderFloat("Motion Blur Strength", &config::motion_blur_strength, 0.0f, 1.0f, "%.2f")) {
-        config::save();
+    if (ImGui::SliderFloat("Motion Blur Strength", &Config::Manager::motion_blur_strength, 0.0f, 1.0f, "%.2f")) {
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Motion blur strength (0.0 = none, 1.0 = maximum)");
     
-    // Export Options
     ImGui::Spacing();
-    if (ImGui::Checkbox("Export OpenEXR", &config::export_openexr)) {
-        config::save();
+    if (ImGui::Checkbox("Export OpenEXR", &Config::Manager::export_openexr)) {
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Export OpenEXR image sequence alongside video");
     
-    if (ImGui::Checkbox("Disable Watermark", &config::disable_watermark)) {
-        config::save();
+    if (ImGui::Checkbox("Disable Watermark", &Config::Manager::disable_watermark)) {
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Remove Rockstar Editor watermark from exports");
     
-    if (ImGui::Checkbox("Auto Reload Config", &config::auto_reload_config)) {
-        config::save();
+    if (ImGui::Checkbox("Auto Reload Config", &Config::Manager::auto_reload_config)) {
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Automatically reload config when INI file changes");
     
-    // Output Directory
     ImGui::Spacing();
     ImGui::TextUnformatted("Output Directory");
     ImGui::Separator();
     
     char output_path[512];
-    strncpy_s(output_path, config::output_dir.c_str(), sizeof(output_path) - 1);
+    strncpy_s(output_path, Config::Manager::output_dir.c_str(), sizeof(output_path) - 1);
     if (ImGui::InputText("##OutputDir", output_path, sizeof(output_path))) {
-        config::output_dir = output_path;
-        config::save();
+        Config::Manager::output_dir = output_path;
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Directory where exported videos will be saved");
     
-    // Log Level
     ImGui::Spacing();
     ImGui::TextUnformatted("Log Level");
     ImGui::Separator();
     
     const char* log_levels[] = { "Error", "Warning", "Info", "Debug", "Trace" };
-    int current_log_level = static_cast<int>(config::log_level);
+    int current_log_level = static_cast<int>(Config::Manager::log_level);
     if (ImGui::Combo("Log Level", &current_log_level, log_levels, IM_ARRAYSIZE(log_levels))) {
-        config::log_level = static_cast<LogLevel>(current_log_level);
-        Logger::instance().level = config::log_level;
-        config::save();
+        Config::Manager::log_level = static_cast<LogLevel>(current_log_level);
+        Logger::instance().level = Config::Manager::log_level;
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Set logging verbosity level");
     
-    // Actions
     ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::Button("Reload Config from INI")) {
-        config::reload();
-        Logger::instance().level = config::log_level;
+        Config::Manager::reload();
+        Logger::instance().level = Config::Manager::log_level;
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Reload all settings from the INI file");
     
     ImGui::SameLine();
     if (ImGui::Button("Save All Settings")) {
-        config::save();
+        Config::Manager::save();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Force save all current settings to INI file");
     
     ImGui::EndDisabled();
     
-    // Status Info
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextUnformatted("Status Information");
-    ImGui::Text("Current FPS: %.2f", static_cast<float>(config::fps.first) / static_cast<float>(config::fps.second));
+    ImGui::Text("Current FPS: %.2f", static_cast<float>(Config::Manager::fps.first) / static_cast<float>(Config::Manager::fps.second));
     ImGui::Text("Export Active: %s", is_rendering ? "YES" : "NO");
 }
 
@@ -191,7 +181,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         try {
             LOG(LL_NON, std::filesystem::current_path());
             
-            // Add DLL directory for dependencies
             const std::wstring dll_path = utf8_decode(AsiPath() + R"(\EVER\dlls\)");
             if (!SetDllDirectoryW(dll_path.c_str())) {
                 const DWORD err = ::GetLastError();
@@ -203,26 +192,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
             LOG(LL_DBG, "Initializing PolyHook logger");
             PLH::Log::registerLogger(std::make_unique<PolyHookLogger>());
             
-            // Register with Reshade
             if (reshade::register_addon(hModule)) {
                 LOG(LL_NON, "Successfully registered with Reshade!");
-                // Register settings overlay
                 reshade::register_overlay(nullptr, draw_eve_settings);
-                // Register event to block overlay during export
                 reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
             } else {
                 LOG(LL_ERR, "Failed to register with Reshade! EVE requires Reshade to function.");
                 return FALSE;
             }
             
-            config::reload();
-            if (!config::is_mod_enabled) {
+            Config::Manager::reload();
+            if (!Config::Manager::is_mod_enabled) {
                 LOG(LL_NON, "Extended Video Export mod is disabled in the config file. Exiting...");
                 return TRUE;
             } else {
                 LOG(LL_NON, "Extended Video Export mod is enabled. Initializing...");
             }
-            Logger::instance().level = config::log_level;
+            Logger::instance().level = Config::Manager::log_level;
             LOG_CALL(LL_DBG, ever::initialize());
             LOG(LL_NFO, "Registering script...");
             LOG_CALL(LL_DBG, scriptRegister(hModule, ever::ScriptMain));
@@ -243,9 +229,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
             LOG_CALL(LL_DBG, ever::finalize());
             reshade::unregister_addon(hModule);
         }
-        catch (...) {
-            // Silent cleanup failure
-        }
+        catch (...) { }
         break;
     }
     return TRUE;

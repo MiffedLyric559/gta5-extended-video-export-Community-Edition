@@ -1,16 +1,15 @@
-// script.cpp : Defines the exported functions for the DLL application.
-//
+// TODO: Split this codebase into multiple files.
 #include "script.h"
 #include "MFUtility.h"
-#include "encoder.h"
-#include "hookdefs.h"
+#include "EncoderSession.h"
+#include "HookDefinitions.h"
 #include "logger.h"
 #include "stdafx.h"
 #include "util.h"
-#include "yara-helper.h"
+#include "PatternScanner.h"
 #include <mferror.h>
 
-#include "yara-patterns.h"
+#include "ScanPatterns.h"
 #include <DirectXTex.h>
 #include <algorithm>
 #include <array>
@@ -46,485 +45,479 @@ using namespace Microsoft::WRL;
 using namespace DirectX;
 
 namespace {
-ComPtr<ID3D11Texture2D> pGameBackBuffer;
-ComPtr<ID3D11Texture2D> pGameBackBufferResolved;
-ComPtr<ID3D11Texture2D> pGameDepthBufferQuarterLinear;
-ComPtr<ID3D11Texture2D> pGameDepthBufferQuarter;
-ComPtr<ID3D11Texture2D> pGameDepthBufferResolved;
-ComPtr<ID3D11Texture2D> pGameDepthBuffer;
-ComPtr<ID3D11Texture2D> pGameGBuffer0;
-ComPtr<ID3D11Texture2D> pGameEdgeCopy;
-ComPtr<ID3D11Texture2D> pLinearDepthTexture;
-ComPtr<ID3D11Texture2D> pStencilTexture;
-void* pCtxLinearizeBuffer = nullptr;
-bool isCustomFrameRateSupported = false;
-std::unique_ptr<Encoder::Session> encodingSession;
-std::mutex mxSession;
-std::mutex mxOnPresent;
-std::condition_variable mainSwapChainReadyCv;
-std::thread::id mainThreadId;
-ComPtr<IDXGISwapChain> mainSwapChain;
-ComPtr<IDXGIFactory> pDxgiFactory;
-ComPtr<ID3D11DeviceContext> pDContext;
-ComPtr<ID3D11Texture2D> pMotionBlurAccBuffer;
-ComPtr<ID3D11Texture2D> pMotionBlurFinalBuffer;
-ComPtr<ID3D11VertexShader> pVsFullScreen;
-ComPtr<ID3D11PixelShader> pPsAccumulate;
-ComPtr<ID3D11PixelShader> pPsDivide;
-ComPtr<ID3D11Buffer> pDivideConstantBuffer;
-ComPtr<ID3D11RasterizerState> pRasterState;
-ComPtr<ID3D11SamplerState> pPsSampler;
-ComPtr<ID3D11RenderTargetView> pRtvAccBuffer;
-ComPtr<ID3D11RenderTargetView> pRtvBlurBuffer;
-ComPtr<ID3D11ShaderResourceView> pSrvAccBuffer;
-ComPtr<ID3D11Texture2D> pSourceSrvTexture;
-ComPtr<ID3D11ShaderResourceView> pSourceSrv;
-ComPtr<ID3D11BlendState> pAccBlendState;
-std::mutex d3d11HookMutex;
-bool isD3D11HookInstalled = false;
-thread_local bool isInstallingD3D11Hook = false;
-std::atomic_bool hasLoggedD3D11HookFailure = false;
-std::atomic_bool hasLoggedMissingFactory2 = false;
-std::chrono::steady_clock::time_point lastD3D11HookAttempt;
+    ComPtr<ID3D11Texture2D> pGameBackBuffer;
+    ComPtr<ID3D11Texture2D> pGameBackBufferResolved;
+    ComPtr<ID3D11Texture2D> pGameDepthBufferQuarterLinear;
+    ComPtr<ID3D11Texture2D> pGameDepthBufferQuarter;
+    ComPtr<ID3D11Texture2D> pGameDepthBufferResolved;
+    ComPtr<ID3D11Texture2D> pGameDepthBuffer;
+    ComPtr<ID3D11Texture2D> pGameGBuffer0;
+    ComPtr<ID3D11Texture2D> pGameEdgeCopy;
+    ComPtr<ID3D11Texture2D> pLinearDepthTexture;
+    ComPtr<ID3D11Texture2D> pStencilTexture;
+    void* pCtxLinearizeBuffer = nullptr;
+    bool isCustomFrameRateSupported = false;
+    std::unique_ptr<Encoder::EncoderSession> encodingSession;
+    std::mutex mxSession;
+    std::mutex mxOnPresent;
+    std::condition_variable mainSwapChainReadyCv;
+    std::thread::id mainThreadId;
+    ComPtr<IDXGISwapChain> mainSwapChain;
+    ComPtr<IDXGIFactory> pDxgiFactory;
+    ComPtr<ID3D11DeviceContext> pDContext;
+    ComPtr<ID3D11Texture2D> pMotionBlurAccBuffer;
+    ComPtr<ID3D11Texture2D> pMotionBlurFinalBuffer;
+    ComPtr<ID3D11VertexShader> pVsFullScreen;
+    ComPtr<ID3D11PixelShader> pPsAccumulate;
+    ComPtr<ID3D11PixelShader> pPsDivide;
+    ComPtr<ID3D11Buffer> pDivideConstantBuffer;
+    ComPtr<ID3D11RasterizerState> pRasterState;
+    ComPtr<ID3D11SamplerState> pPsSampler;
+    ComPtr<ID3D11RenderTargetView> pRtvAccBuffer;
+    ComPtr<ID3D11RenderTargetView> pRtvBlurBuffer;
+    ComPtr<ID3D11ShaderResourceView> pSrvAccBuffer;
+    ComPtr<ID3D11Texture2D> pSourceSrvTexture;
+    ComPtr<ID3D11ShaderResourceView> pSourceSrv;
+    ComPtr<ID3D11BlendState> pAccBlendState;
+    std::mutex d3d11HookMutex;
+    bool isD3D11HookInstalled = false;
+    thread_local bool isInstallingD3D11Hook = false;
+    std::atomic_bool hasLoggedD3D11HookFailure = false;
+    std::atomic_bool hasLoggedMissingFactory2 = false;
+    std::chrono::steady_clock::time_point lastD3D11HookAttempt;
 
-constexpr std::chrono::milliseconds kD3D11HookRetryDelay(100);
-constexpr std::chrono::milliseconds kSwapChainReadyTimeout(5000);
-constexpr std::chrono::milliseconds kSwapChainReadyPollInterval(250);
+    constexpr std::chrono::milliseconds kD3D11HookRetryDelay(100);
+    constexpr std::chrono::milliseconds kSwapChainReadyTimeout(5000);
+    constexpr std::chrono::milliseconds kSwapChainReadyPollInterval(250);
 
-constexpr SIZE_T kMaxLoggedAnsiChars = 1024;
+    constexpr SIZE_T kMaxLoggedAnsiChars = 1024;
 
-std::string SafeAnsiString(const char* value) {
-    if (!value) {
-        return "<NULL>";
+    std::string SafeAnsiString(const char* value) {
+        if (!value) {
+            return "<NULL>";
+        }
+
+        if (IsBadStringPtrA(value, static_cast<UINT_PTR>(kMaxLoggedAnsiChars))) {
+            std::ostringstream oss;
+            oss << "<INVALID PTR 0x" << std::uppercase << std::hex << reinterpret_cast<uintptr_t>(value) << ">";
+            return oss.str();
+        }
+
+        const size_t len = strnlen_s(value, kMaxLoggedAnsiChars);
+        std::string result(value, len);
+        if (len == kMaxLoggedAnsiChars) {
+            result.append("...");
+        }
+        return result;
     }
 
-    if (IsBadStringPtrA(value, static_cast<UINT_PTR>(kMaxLoggedAnsiChars))) {
-        std::ostringstream oss;
-        oss << "<INVALID PTR 0x" << std::uppercase << std::hex << reinterpret_cast<uintptr_t>(value) << ">";
-        return oss.str();
-    }
+    class ScopedFlagGuard {
+    public:
+        explicit ScopedFlagGuard(bool& flag) : ref(flag) { ref = true; }
+        ~ScopedFlagGuard() { ref = false; }
 
-    const size_t len = strnlen_s(value, kMaxLoggedAnsiChars);
-    std::string result(value, len);
-    if (len == kMaxLoggedAnsiChars) {
-        result.append("...");
-    }
-    return result;
-}
+        ScopedFlagGuard(const ScopedFlagGuard&) = delete;
+        ScopedFlagGuard& operator=(const ScopedFlagGuard&) = delete;
 
-class ScopedFlagGuard {
-public:
-    explicit ScopedFlagGuard(bool& flag) : ref(flag) { ref = true; }
-    ~ScopedFlagGuard() { ref = false; }
+    private:
+        bool& ref;
+    };
 
-    ScopedFlagGuard(const ScopedFlagGuard&) = delete;
-    ScopedFlagGuard& operator=(const ScopedFlagGuard&) = delete;
+    struct ExportContext {
+        ExportContext() {
+            PRE();
+            POST();
+        }
+        ~ExportContext() {
+            PRE();
+            POST();
+        }
 
-private:
-    bool& ref;
-};
+        ExportContext(const ExportContext& other) = delete;
+        ExportContext& operator=(const ExportContext& other) = delete;
+        ExportContext(ExportContext&& other) = delete;
+        ExportContext& operator=(ExportContext&& other) = delete;
 
-struct ExportContext {
-    ExportContext() {
-        PRE();
-        POST();
-    }
-    ~ExportContext() {
-        PRE();
-        POST();
-    }
+        bool is_audio_export_disabled = false;
+        ComPtr<ID3D11Texture2D> p_export_render_target;
+        ComPtr<ID3D11DeviceContext> p_device_context;
+        ComPtr<ID3D11Device> p_device;
+        ComPtr<IDXGISwapChain> p_swap_chain;
+        ComPtr<IMFMediaType> video_media_type;
+        int acc_count = 0;
+        int total_frame_num = 0;
+    };
 
-    ExportContext(const ExportContext& other) = delete;
-    ExportContext& operator=(const ExportContext& other) = delete;
-    ExportContext(ExportContext&& other) = delete;
-    ExportContext& operator=(ExportContext&& other) = delete;
+    std::unique_ptr<ExportContext> exportContext;
+    std::unique_ptr<ever::hooking::PatternScanner> patternScanner;
 
-    bool is_audio_export_disabled = false;
-    ComPtr<ID3D11Texture2D> p_export_render_target;
-    ComPtr<ID3D11DeviceContext> p_device_context;
-    ComPtr<ID3D11Device> p_device;
-    ComPtr<IDXGISwapChain> p_swap_chain;
-    ComPtr<IMFMediaType> video_media_type;
-    int acc_count = 0;
-    int total_frame_num = 0;
-};
+    enum class DualPassState {
+        IDLE,
+        PASS1_RUNNING,
+        PASS1_COMPLETE,
+        PASS2_PENDING,
+        PASS2_RUNNING,
+        PASS2_COMPLETE 
+    };
 
-std::unique_ptr<ExportContext> exportContext;
-std::unique_ptr<YaraHelper> pYaraHelper;
+    struct DualPassContext {
+        DualPassState state = DualPassState::IDLE;
+        void* saved_video_editor_interface = nullptr;
+        void* saved_montage_ptr = nullptr;
+        
+        std::pair<int32_t, int32_t> original_fps;
+        int32_t original_motion_blur_samples = 0;
+        
+        std::string timestamp;
+        std::string final_output_file;
+        
+        std::vector<BYTE> audio_buffer;
+        uint32_t audio_sample_rate = 48000;
+        uint16_t audio_channels = 2;
+        uint16_t audio_bits_per_sample = 16;
+        uint32_t audio_block_align = 4;
+        size_t audio_buffer_playback_position = 0;
+    };
 
-// Dual-pass audio rendering state tracking
-enum class DualPassState {
-    IDLE,              // Not exporting
-    PASS1_RUNNING,     // Pass 1 (audio only) in progress
-    PASS1_COMPLETE,    // Pass 1 finished, waiting to trigger Pass 2
-    PASS2_PENDING,     // About to start Pass 2
-    PASS2_RUNNING,     // Pass 2 (video only) in progress
-    PASS2_COMPLETE     // Pass 2 finished, ready to mux
-};
+    std::unique_ptr<DualPassContext> dualPassContext;
 
-struct DualPassContext {
-    DualPassState state = DualPassState::IDLE;
-    void* saved_video_editor_interface = nullptr;
-    void* saved_montage_ptr = nullptr;
-    
-    // Save original settings for restoration in Pass 2
-    std::pair<int32_t, int32_t> original_fps;
-    int32_t original_motion_blur_samples = 0;
-    
-    // Track output filenames
-    std::string timestamp;
-    std::string final_output_file;
-    
-    // In-memory audio buffer for Pass 1 capture (dynamically grows)
-    std::vector<BYTE> audio_buffer;
-    uint32_t audio_sample_rate = 48000;
-    uint16_t audio_channels = 2;
-    uint16_t audio_bits_per_sample = 16;
-    uint32_t audio_block_align = 4;  // channels * (bits_per_sample / 8)
-    size_t audio_buffer_playback_position = 0;  // For Pass 2 replay
-};
+    IsPendingPendingBakeStartFunc pIsPendingPendingBakeStartFunc = nullptr;
 
-std::unique_ptr<DualPassContext> dualPassContext;
+    bool bindExportSwapChainIfAvailableLocked() {
+        if (!exportContext) {
+            return false;
+        }
 
-// IsPendingPendingBakeStart function pointer (too small to hook, so we call it directly)
-IsPendingPendingBakeStartFunc pIsPendingPendingBakeStartFunc = nullptr;
-
-bool bindExportSwapChainIfAvailableLocked() {
-    if (!exportContext) {
-        return false;
-    }
-
-    if (exportContext->p_swap_chain) {
-        return true;
-    }
-
-    if (!mainSwapChain) {
-        return false;
-    }
-
-    exportContext->p_swap_chain = mainSwapChain;
-    LOG(LL_DBG, "Export context bound to main swap chain",
-        Logger::hex(reinterpret_cast<uint64_t>(mainSwapChain.Get()), 16));
-    return true;
-}
-
-bool bindExportSwapChainIfAvailable() {
-    std::lock_guard onPresentLock(mxOnPresent);
-    return bindExportSwapChainIfAvailableLocked();
-}
-
-bool waitForMainSwapChain(const std::chrono::milliseconds timeout) {
-    std::unique_lock lock(mxOnPresent);
-    if (mainSwapChain) {
-        LOG(LL_DBG, "Swap chain already available before wait started");
-        return true;
-    }
-
-    if (timeout.count() <= 0) {
-        LOG(LL_DBG, "Swap chain wait requested with non-positive timeout; skipping wait");
-        return false;
-    }
-
-    const auto start = std::chrono::steady_clock::now();
-    auto remaining = timeout;
-    size_t attempt = 0;
-
-    while (remaining.count() > 0 && !mainSwapChain) {
-        const auto slice = std::min(remaining, kSwapChainReadyPollInterval);
-        ++attempt;
-        if (mainSwapChainReadyCv.wait_for(lock, slice, [] { return mainSwapChain != nullptr; })) {
-            const auto waited =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-            LOG(LL_DBG, "Swap chain became ready after ", waited.count(), "ms (", attempt, " wait cycles)");
+        if (exportContext->p_swap_chain) {
             return true;
         }
 
-        remaining -= slice;
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(timeout - remaining).count();
-        LOG(LL_DBG, "Swap chain still pending after ", elapsed, "ms (attempt ", attempt, ")");
+        if (!mainSwapChain) {
+            return false;
+        }
+
+        exportContext->p_swap_chain = mainSwapChain;
+        LOG(LL_DBG, "Export context bound to main swap chain",
+            Logger::hex(reinterpret_cast<uint64_t>(mainSwapChain.Get()), 16));
+        return true;
     }
 
-    LOG(LL_DBG, "Swap chain wait timed out after ", timeout.count(), "ms");
-    return mainSwapChain != nullptr;
-}
-
-void captureMainSwapChain(IDXGISwapChain* pSwapChain, const char* sourceLabel) {
-    if (!pSwapChain) {
-        LOG(LL_DBG, sourceLabel, ": swap chain pointer was null");
-        return;
-    }
-
-    std::lock_guard onPresentLock(mxOnPresent);
-    const bool isSame = (mainSwapChain.Get() == pSwapChain);
-    mainSwapChain = pSwapChain;
-    mainSwapChainReadyCv.notify_all();
-    bindExportSwapChainIfAvailableLocked();
-
-    if (isSame) {
-        LOG(LL_TRC, sourceLabel, ": reuse of existing swap chain ptr:",
-            Logger::hex(reinterpret_cast<uint64_t>(pSwapChain), 16));
-    } else {
-        LOG(LL_DBG, sourceLabel, ": captured swap chain ptr:",
-            Logger::hex(reinterpret_cast<uint64_t>(pSwapChain), 16));
-    }
-}
-
-void installFactoryHooks(IDXGIFactory* factory) {
-    if (!factory) {
-        return;
-    }
-
-    {
+    bool bindExportSwapChainIfAvailable() {
         std::lock_guard onPresentLock(mxOnPresent);
-        if (!pDxgiFactory || (pDxgiFactory.Get() != factory)) {
-            pDxgiFactory = factory;
+        return bindExportSwapChainIfAvailableLocked();
+    }
+
+    bool waitForMainSwapChain(const std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mxOnPresent);
+        if (mainSwapChain) {
+            LOG(LL_DBG, "Swap chain already available before wait started");
+            return true;
+        }
+
+        if (timeout.count() <= 0) {
+            LOG(LL_DBG, "Swap chain wait requested with non-positive timeout; skipping wait");
+            return false;
+        }
+
+        const auto start = std::chrono::steady_clock::now();
+        auto remaining = timeout;
+        size_t attempt = 0;
+
+        while (remaining.count() > 0 && !mainSwapChain) {
+            const auto slice = std::min(remaining, kSwapChainReadyPollInterval);
+            ++attempt;
+            if (mainSwapChainReadyCv.wait_for(lock, slice, [] { return mainSwapChain != nullptr; })) {
+                const auto waited =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+                LOG(LL_DBG, "Swap chain became ready after ", waited.count(), "ms (", attempt, " wait cycles)");
+                return true;
+            }
+
+            remaining -= slice;
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(timeout - remaining).count();
+            LOG(LL_DBG, "Swap chain still pending after ", elapsed, "ms (attempt ", attempt, ")");
+        }
+
+        LOG(LL_DBG, "Swap chain wait timed out after ", timeout.count(), "ms");
+        return mainSwapChain != nullptr;
+    }
+
+    void captureMainSwapChain(IDXGISwapChain* pSwapChain, const char* sourceLabel) {
+        if (!pSwapChain) {
+            LOG(LL_DBG, sourceLabel, ": swap chain pointer was null");
+            return;
+        }
+
+        std::lock_guard onPresentLock(mxOnPresent);
+        const bool isSame = (mainSwapChain.Get() == pSwapChain);
+        mainSwapChain = pSwapChain;
+        mainSwapChainReadyCv.notify_all();
+        bindExportSwapChainIfAvailableLocked();
+
+        if (isSame) {
+            LOG(LL_TRC, sourceLabel, ": reuse of existing swap chain ptr:",
+                Logger::hex(reinterpret_cast<uint64_t>(pSwapChain), 16));
+        } else {
+            LOG(LL_DBG, sourceLabel, ": captured swap chain ptr:",
+                Logger::hex(reinterpret_cast<uint64_t>(pSwapChain), 16));
         }
     }
 
-    try {
-        PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory, CreateSwapChain, factory);
-    } catch (const std::exception& ex) {
-        LOG(LL_WRN, "Failed to hook IDXGIFactory::CreateSwapChain: ", ex.what());
-    } catch (...) {
-        LOG(LL_WRN, "Failed to hook IDXGIFactory::CreateSwapChain");
-    }
+    void installFactoryHooks(IDXGIFactory* factory) {
+        if (!factory) {
+            return;
+        }
 
-    ComPtr<IDXGIFactory2> factory2;
-    if (SUCCEEDED(factory->QueryInterface(factory2.GetAddressOf()))) {
+        {
+            std::lock_guard onPresentLock(mxOnPresent);
+            if (!pDxgiFactory || (pDxgiFactory.Get() != factory)) {
+                pDxgiFactory = factory;
+            }
+        }
+
         try {
-            PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForHwnd, factory2.Get());
+            PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory, CreateSwapChain, factory);
         } catch (const std::exception& ex) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForHwnd: ", ex.what());
+            LOG(LL_WRN, "Failed to hook IDXGIFactory::CreateSwapChain: ", ex.what());
         } catch (...) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForHwnd");
+            LOG(LL_WRN, "Failed to hook IDXGIFactory::CreateSwapChain");
+        }
+
+        ComPtr<IDXGIFactory2> factory2;
+        if (SUCCEEDED(factory->QueryInterface(factory2.GetAddressOf()))) {
+            try {
+                PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForHwnd, factory2.Get());
+            } catch (const std::exception& ex) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForHwnd: ", ex.what());
+            } catch (...) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForHwnd");
+            }
+
+            try {
+                PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForCoreWindow, factory2.Get());
+            } catch (const std::exception& ex) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForCoreWindow: ", ex.what());
+            } catch (...) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForCoreWindow");
+            }
+
+            try {
+                PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForComposition, factory2.Get());
+            } catch (const std::exception& ex) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForComposition: ", ex.what());
+            } catch (...) {
+                LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForComposition");
+            }
+        } else if (!hasLoggedMissingFactory2.exchange(true)) {
+            LOG(LL_DBG, "IDXGIFactory does not expose IDXGIFactory2 interfaces; skipping extended hooks");
+        }
+    }
+
+    void installFactoryHooksFromSwapChain(IDXGISwapChain* swapChain, const char* sourceLabel) {
+        if (!swapChain) {
+            return;
+        }
+
+        ComPtr<IDXGIFactory> swapFactory;
+        if (FAILED(swapChain->GetParent(__uuidof(IDXGIFactory),
+                                        reinterpret_cast<void**>(swapFactory.GetAddressOf())))) {
+            LOG(LL_DBG, sourceLabel, ": failed to query IDXGIFactory from swap chain");
+            return;
+        }
+
+        installFactoryHooks(swapFactory.Get());
+    }
+
+    void captureAndHookSwapChain(IDXGISwapChain* swapChain, const char* sourceLabel) {
+        if (!swapChain) {
+            LOG(LL_DBG, sourceLabel, ": capture request received null swap chain pointer");
+            return;
+        }
+
+        captureMainSwapChain(swapChain, sourceLabel);
+        try {
+            PERFORM_MEMBER_HOOK_REQUIRED(IDXGISwapChain, Present, swapChain);
+        } catch (...) {
+            LOG(LL_ERR, sourceLabel, ": failed to hook IDXGISwapChain::Present");
+        }
+    }
+
+    void captureSwapChainFromSwapChain1(IDXGISwapChain1* swapChain, const char* sourceLabel) {
+        if (!swapChain) {
+            LOG(LL_DBG, sourceLabel, ": IDXGISwapChain1 pointer was null");
+            return;
+        }
+
+        ComPtr<IDXGISwapChain> baseSwapChain;
+        if (FAILED(swapChain->QueryInterface(baseSwapChain.GetAddressOf()))) {
+            LOG(LL_WRN, sourceLabel, ": failed to query IDXGISwapChain from IDXGISwapChain1");
+            return;
+        }
+
+        captureAndHookSwapChain(baseSwapChain.Get(), sourceLabel);
+    }
+
+    std::string dumpMemoryBytes(uint64_t address, const size_t byteCount) {
+        if (address == 0 || byteCount == 0) {
+            return {};
+        }
+
+        std::vector<uint8_t> buffer(byteCount, 0);
+        SIZE_T bytesRead = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), buffer.data(), byteCount,
+                            &bytesRead)) {
+            const auto err = GetLastError();
+            LOG(LL_WRN, "ReadProcessMemory failed for address", Logger::hex(address, 16), ": ", err, " ",
+                Logger::hex(err, 8));
+            return {};
+        }
+
+        std::ostringstream stream;
+        stream << std::hex << std::setfill('0');
+        for (SIZE_T i = 0; i < bytesRead; ++i) {
+            if (i != 0) {
+                stream << ' ';
+            }
+            stream << std::setw(2) << static_cast<uint32_t>(buffer[i]);
+        }
+
+        return stream.str();
+    }
+
+    void logResolvedHookTarget(const char* label, const uint64_t address, const size_t previewBytes = 32) {
+        if (address == 0) {
+            LOG(LL_WRN, label, " address was not resolved");
+            return;
+        }
+
+        LOG(LL_NFO, label, " address:", Logger::hex(address, 16));
+        const auto bytes = dumpMemoryBytes(address, previewBytes);
+        if (!bytes.empty()) {
+            LOG(LL_DBG, label, " first bytes:", bytes);
+        }
+    }
+
+    bool installAbsoluteJumpHook(uint64_t address, uintptr_t hookAddress) {
+        if (address == 0 || hookAddress == 0) {
+            return false;
+        }
+
+        constexpr size_t patchSize = 12; // mov rax, imm64; jmp rax
+        std::array<uint8_t, patchSize> patch{};
+        patch[0] = 0x48;
+        patch[1] = 0xB8;
+
+        std::memcpy(&patch[2], &hookAddress, sizeof(hookAddress));
+        patch[10] = 0xFF;
+        patch[11] = 0xE0;
+
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(reinterpret_cast<LPVOID>(address), patchSize, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            const auto err = GetLastError();
+            LOG(LL_ERR, "VirtualProtect failed for", Logger::hex(address, 16), ": ", err, " ",
+                Logger::hex(err, 8));
+            return false;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(address), patch.data(), patchSize);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), patchSize);
+
+        DWORD unused = 0;
+        VirtualProtect(reinterpret_cast<LPVOID>(address), patchSize, oldProtect, &unused);
+        LOG(LL_DBG, "Installed absolute jump hook at", Logger::hex(address, 16), " -> ",
+            Logger::hex(static_cast<uint64_t>(hookAddress), 16));
+        return true;
+    }
+
+    void touchD3D11Import() {
+        static auto d3d11Import = &D3D11CreateDeviceAndSwapChain;
+        (void)d3d11Import;
+    }
+
+    bool installD3D11Hook(HMODULE module) {
+        if (module == nullptr) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastD3D11HookAttempt < kD3D11HookRetryDelay) {
+            LOG(LL_TRC, "Skipping D3D11 hook attempt (debounce window)");
+            return isD3D11HookInstalled;
+        }
+        lastD3D11HookAttempt = now;
+
+        LOG(LL_DBG, "installD3D11Hook invoked. module:", module);
+        if (isInstallingD3D11Hook) {
+            LOG(LL_TRC, "D3D11 hook installation already in progress; skipping nested request");
+            return true;
+        }
+
+        ScopedFlagGuard installGuard(isInstallingD3D11Hook);
+        std::scoped_lock hookLock(d3d11HookMutex);
+        if (isD3D11HookInstalled) {
+            LOG(LL_TRC, "D3D11 hook already installed");
+            return true;
         }
 
         try {
-            PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForCoreWindow, factory2.Get());
-        } catch (const std::exception& ex) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForCoreWindow: ", ex.what());
+            LOG(LL_DBG, "Attempting to hook D3D11CreateDeviceAndSwapChain export");
+            const auto proc = GetProcAddress(module, "D3D11CreateDeviceAndSwapChain");
+            if (proc == nullptr) {
+                LOG(LL_ERR, "GetProcAddress failed for D3D11CreateDeviceAndSwapChain");
+                return false;
+            }
+
+            const auto address = reinterpret_cast<uint64_t>(proc);
+            const HRESULT hr = ever::hooking::hookX64Function(address, reinterpret_cast<void*>(ExportHooks::D3D11CreateDeviceAndSwapChain::Implementation),
+                                            &ExportHooks::D3D11CreateDeviceAndSwapChain::OriginalFunc,
+                                            ExportHooks::D3D11CreateDeviceAndSwapChain::Detour,
+                                            PLH::x64Detour::detour_scheme_t::INPLACE);
+            if (FAILED(hr)) {
+                LOG(LL_ERR, "hookX64Function failed for D3D11CreateDeviceAndSwapChain: ", hr);
+                return false;
+            }
+
+            isD3D11HookInstalled = true;
+            LOG(LL_DBG, "D3D11CreateDeviceAndSwapChain hook installed via detour");
+        } catch (std::exception& ex) {
+            LOG(LL_ERR, "Failed to hook D3D11CreateDeviceAndSwapChain: ", ex.what());
+            if (!hasLoggedD3D11HookFailure.exchange(true)) {
+                LOG(LL_ERR, "D3D11 hook failed once; will keep retrying lazily");
+            }
         } catch (...) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForCoreWindow");
+            LOG(LL_ERR, "Failed to hook D3D11CreateDeviceAndSwapChain");
+            if (!hasLoggedD3D11HookFailure.exchange(true)) {
+                LOG(LL_ERR, "D3D11 hook failed with unknown exception");
+            }
         }
 
-        try {
-            PERFORM_MEMBER_HOOK_REQUIRED(IDXGIFactory2, CreateSwapChainForComposition, factory2.Get());
-        } catch (const std::exception& ex) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForComposition: ", ex.what());
-        } catch (...) {
-            LOG(LL_WRN, "Failed to hook IDXGIFactory2::CreateSwapChainForComposition");
-        }
-    } else if (!hasLoggedMissingFactory2.exchange(true)) {
-        LOG(LL_DBG, "IDXGIFactory does not expose IDXGIFactory2 interfaces; skipping extended hooks");
-    }
-}
-
-void installFactoryHooksFromSwapChain(IDXGISwapChain* swapChain, const char* sourceLabel) {
-    if (!swapChain) {
-        return;
-    }
-
-    ComPtr<IDXGIFactory> swapFactory;
-    if (FAILED(swapChain->GetParent(__uuidof(IDXGIFactory),
-                                    reinterpret_cast<void**>(swapFactory.GetAddressOf())))) {
-        LOG(LL_DBG, sourceLabel, ": failed to query IDXGIFactory from swap chain");
-        return;
-    }
-
-    installFactoryHooks(swapFactory.Get());
-}
-
-void captureAndHookSwapChain(IDXGISwapChain* swapChain, const char* sourceLabel) {
-    if (!swapChain) {
-        LOG(LL_DBG, sourceLabel, ": capture request received null swap chain pointer");
-        return;
-    }
-
-    captureMainSwapChain(swapChain, sourceLabel);
-    try {
-        PERFORM_MEMBER_HOOK_REQUIRED(IDXGISwapChain, Present, swapChain);
-    } catch (...) {
-        LOG(LL_ERR, sourceLabel, ": failed to hook IDXGISwapChain::Present");
-    }
-}
-
-void captureSwapChainFromSwapChain1(IDXGISwapChain1* swapChain, const char* sourceLabel) {
-    if (!swapChain) {
-        LOG(LL_DBG, sourceLabel, ": IDXGISwapChain1 pointer was null");
-        return;
-    }
-
-    ComPtr<IDXGISwapChain> baseSwapChain;
-    if (FAILED(swapChain->QueryInterface(baseSwapChain.GetAddressOf()))) {
-        LOG(LL_WRN, sourceLabel, ": failed to query IDXGISwapChain from IDXGISwapChain1");
-        return;
-    }
-
-    captureAndHookSwapChain(baseSwapChain.Get(), sourceLabel);
-}
-
-std::string dumpMemoryBytes(uint64_t address, const size_t byteCount) {
-    if (address == 0 || byteCount == 0) {
-        return {};
-    }
-
-    std::vector<uint8_t> buffer(byteCount, 0);
-    SIZE_T bytesRead = 0;
-    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), buffer.data(), byteCount,
-                           &bytesRead)) {
-        const auto err = GetLastError();
-        LOG(LL_WRN, "ReadProcessMemory failed for address", Logger::hex(address, 16), ": ", err, " ",
-            Logger::hex(err, 8));
-        return {};
-    }
-
-    std::ostringstream stream;
-    stream << std::hex << std::setfill('0');
-    for (SIZE_T i = 0; i < bytesRead; ++i) {
-        if (i != 0) {
-            stream << ' ';
-        }
-        stream << std::setw(2) << static_cast<uint32_t>(buffer[i]);
-    }
-
-    return stream.str();
-}
-
-void logResolvedHookTarget(const char* label, const uint64_t address, const size_t previewBytes = 32) {
-    if (address == 0) {
-        LOG(LL_WRN, label, " address was not resolved");
-        return;
-    }
-
-    LOG(LL_NFO, label, " address:", Logger::hex(address, 16));
-    const auto bytes = dumpMemoryBytes(address, previewBytes);
-    if (!bytes.empty()) {
-        LOG(LL_DBG, label, " first bytes:", bytes);
-    }
-}
-
-bool installAbsoluteJumpHook(uint64_t address, uintptr_t hookAddress) {
-    if (address == 0 || hookAddress == 0) {
-        return false;
-    }
-
-    constexpr size_t patchSize = 12; // mov rax, imm64; jmp rax
-    std::array<uint8_t, patchSize> patch{};
-    patch[0] = 0x48;
-    patch[1] = 0xB8;
-
-    std::memcpy(&patch[2], &hookAddress, sizeof(hookAddress));
-    patch[10] = 0xFF;
-    patch[11] = 0xE0;
-
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(address), patchSize, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        const auto err = GetLastError();
-        LOG(LL_ERR, "VirtualProtect failed for", Logger::hex(address, 16), ": ", err, " ",
-            Logger::hex(err, 8));
-        return false;
-    }
-
-    std::memcpy(reinterpret_cast<void*>(address), patch.data(), patchSize);
-    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), patchSize);
-
-    DWORD unused = 0;
-    VirtualProtect(reinterpret_cast<LPVOID>(address), patchSize, oldProtect, &unused);
-    LOG(LL_DBG, "Installed absolute jump hook at", Logger::hex(address, 16), " -> ",
-        Logger::hex(static_cast<uint64_t>(hookAddress), 16));
-    return true;
-}
-
-void touchD3D11Import() {
-    static auto d3d11Import = &D3D11CreateDeviceAndSwapChain;
-    (void)d3d11Import;
-}
-
-bool installD3D11Hook(HMODULE module) {
-    if (module == nullptr) {
-        return false;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastD3D11HookAttempt < kD3D11HookRetryDelay) {
-        LOG(LL_TRC, "Skipping D3D11 hook attempt (debounce window)");
         return isD3D11HookInstalled;
     }
-    lastD3D11HookAttempt = now;
 
-    LOG(LL_DBG, "installD3D11Hook invoked. module:", module);
-    if (isInstallingD3D11Hook) {
-        LOG(LL_TRC, "D3D11 hook installation already in progress; skipping nested request");
-        return true;
-    }
+    bool ensureD3D11Hook(bool allowLoadLibrary = true) {
+        touchD3D11Import();
 
-    ScopedFlagGuard installGuard(isInstallingD3D11Hook);
-    std::scoped_lock hookLock(d3d11HookMutex);
-    if (isD3D11HookInstalled) {
-        LOG(LL_TRC, "D3D11 hook already installed");
-        return true;
-    }
+        HMODULE module = GetModuleHandleW(L"d3d11.dll");
+        if (module == nullptr) {
+            if (!allowLoadLibrary) {
+                return false;
+            }
 
-    try {
-        LOG(LL_DBG, "Attempting to hook D3D11CreateDeviceAndSwapChain export");
-        const auto proc = GetProcAddress(module, "D3D11CreateDeviceAndSwapChain");
-        if (proc == nullptr) {
-            LOG(LL_ERR, "GetProcAddress failed for D3D11CreateDeviceAndSwapChain");
+            if (ImportHooks::LoadLibraryW::OriginalFunc != nullptr) {
+                module = ImportHooks::LoadLibraryW::OriginalFunc(L"d3d11.dll");
+            } else {
+                module = ::LoadLibraryW(L"d3d11.dll");
+            }
+        }
+
+        if (module == nullptr) {
             return false;
         }
 
-        const auto address = reinterpret_cast<uint64_t>(proc);
-        const HRESULT hr = hookX64Function(address, reinterpret_cast<void*>(ExportHooks::D3D11CreateDeviceAndSwapChain::Implementation),
-                                           &ExportHooks::D3D11CreateDeviceAndSwapChain::OriginalFunc,
-                                           ExportHooks::D3D11CreateDeviceAndSwapChain::Detour,
-                                           PLH::x64Detour::detour_scheme_t::INPLACE);
-        if (FAILED(hr)) {
-            LOG(LL_ERR, "hookX64Function failed for D3D11CreateDeviceAndSwapChain: ", hr);
-            return false;
-        }
-
-        isD3D11HookInstalled = true;
-        LOG(LL_DBG, "D3D11CreateDeviceAndSwapChain hook installed via detour");
-    } catch (std::exception& ex) {
-        LOG(LL_ERR, "Failed to hook D3D11CreateDeviceAndSwapChain: ", ex.what());
-        if (!hasLoggedD3D11HookFailure.exchange(true)) {
-            LOG(LL_ERR, "D3D11 hook failed once; will keep retrying lazily");
-        }
-    } catch (...) {
-        LOG(LL_ERR, "Failed to hook D3D11CreateDeviceAndSwapChain");
-        if (!hasLoggedD3D11HookFailure.exchange(true)) {
-            LOG(LL_ERR, "D3D11 hook failed with unknown exception");
-        }
+        return installD3D11Hook(module);
     }
-
-    return isD3D11HookInstalled;
 }
-
-bool ensureD3D11Hook(bool allowLoadLibrary = true) {
-    touchD3D11Import();
-
-    HMODULE module = GetModuleHandleW(L"d3d11.dll");
-    if (module == nullptr) {
-        if (!allowLoadLibrary) {
-            return false;
-        }
-
-        if (ImportHooks::LoadLibraryW::OriginalFunc != nullptr) {
-            module = ImportHooks::LoadLibraryW::OriginalFunc(L"d3d11.dll");
-        } else {
-            module = ::LoadLibraryW(L"d3d11.dll");
-        }
-    }
-
-    if (module == nullptr) {
-        return false;
-    }
-
-    return installD3D11Hook(module);
-}
-
-} // namespace
 
 void ever::OnPresent(IDXGISwapChain* p_swap_chain) {
 
@@ -543,19 +536,6 @@ void ever::OnPresent(IDXGISwapChain* p_swap_chain) {
             REQUIRE(p_swap_chain->GetDesc(&desc), "Failed to get swap chain descriptor");
 
             LOG(LL_NFO, "BUFFER COUNT: ", desc.BufferCount);
-            // REQUIRE(
-            //     p_swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-            //     reinterpret_cast<void**>(texture.GetAddressOf())), "Failed to get the texture buffer");
-            // REQUIRE(p_swap_chain->GetDevice(__uuidof(ID3D11Device),
-            // reinterpret_cast<void**>(pDevice.GetAddressOf())),
-            //         "Failed to get the D3D11 device");
-            // pDevice->GetImmediateContext(pDeviceContext.GetAddressOf());
-            // NOT_NULL(pDeviceContext.Get(), "Failed to get D3D11 device context");
-
-            // PERFORM_MEMBER_HOOK_REQUIRED(ID3D11DeviceContext, Draw, pDeviceContext.Get());
-            // PERFORM_MEMBER_HOOK_REQUIRED(ID3D11DeviceContext, DrawIndexed, pDeviceContext.Get());
-            // PERFORM_MEMBER_HOOK_REQUIRED(ID3D11DeviceContext, OMSetRenderTargets, pDeviceContext.Get());
-
         } catch (std::exception& ex) {
             LOG(LL_ERR, ex.what());
         }
@@ -723,8 +703,8 @@ void ever::initialize() {
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryA);
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryW);
 
-        pYaraHelper.reset(new YaraHelper());
-        pYaraHelper->Initialize();
+        patternScanner.reset(new ever::hooking::PatternScanner());
+        patternScanner->initialize();
 
         MODULEINFO info;
         GetModuleInformation(GetCurrentProcess(), GetModuleHandle(nullptr), &info, sizeof(info));
@@ -737,13 +717,25 @@ void ever::initialize() {
         uint64_t pStartBakeProject = NULL;
         uint64_t pWatermarkRenderer = NULL;
         
-        pYaraHelper->AddEntry("get_render_time_base_function", yara_get_render_time_base_function, &pGetRenderTimeBase);
-        pYaraHelper->AddEntry("create_thread_function", yara_create_thread_function, &pCreateThread);
-        pYaraHelper->AddEntry("create_texture_function", yara_create_texture_function, &pCreateTexture);
-        pYaraHelper->AddEntry("is_pending_pending_bake_start", yara_is_pending_pending_bake_start, &pIsPendingPendingBakeStart);
-        pYaraHelper->AddEntry("start_bake_project", yara_start_bake_project, &pStartBakeProject);
-        pYaraHelper->AddEntry("watermark_renderer_render", yara_watermark_renderer_render, &pWatermarkRenderer);
-        pYaraHelper->PerformScan();
+        patternScanner->addPattern("get_render_time_base_function", 
+                                    ever::hooking::patterns::getRenderTimeBase, 
+                                    &pGetRenderTimeBase);
+        patternScanner->addPattern("create_thread_function", 
+                                    ever::hooking::patterns::createThread, 
+                                    &pCreateThread);
+        patternScanner->addPattern("create_texture_function", 
+                                    ever::hooking::patterns::createTexture, 
+                                    &pCreateTexture);
+        patternScanner->addPattern("is_pending_pending_bake_start", 
+                                    ever::hooking::patterns::isPendingPendingBakeStart, 
+                                    &pIsPendingPendingBakeStart);
+        patternScanner->addPattern("start_bake_project", 
+                                    ever::hooking::patterns::startBakeProject, 
+                                    &pStartBakeProject);
+        patternScanner->addPattern("watermark_renderer_render", 
+                                    ever::hooking::patterns::watermarkRendererRender, 
+                                    &pWatermarkRenderer);
+        patternScanner->performScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
         logResolvedHookTarget("CreateTexture", pCreateTexture);
@@ -801,7 +793,7 @@ void ever::initialize() {
             }
             
             // Disable watermark if configured
-            if (config::disable_watermark) {
+            if (Config::Manager::disable_watermark) {
                 PERFORM_SINGLE_BYTE_PATCH(pWatermarkRenderer, 0xC3, "Watermark renderer");
             } else {
                 LOG(LL_DBG, "Watermark renderer not disabled (disable_watermark=false)");
@@ -834,7 +826,6 @@ HMODULE ImportHooks::LoadLibraryW::Implementation(LPCWSTR lp_lib_file_name) {
     PRE();
     const HMODULE result = OriginalFunc(lp_lib_file_name);
 
-    // Create std::wstring from lp_lib_file_name and convert it to lowercase
     std::wstring libFileName(lp_lib_file_name);
     std::ranges::transform(libFileName, libFileName.begin(), std::towlower);
 
@@ -859,7 +850,6 @@ HMODULE ImportHooks::LoadLibraryA::Implementation(LPCSTR lp_lib_file_name) {
 
     if (result != nullptr) {
         try {
-            // Compare lp_lib_file_name with "d3d11.dll" (case insensitive)
             std::string libFileName(lp_lib_file_name);
             std::ranges::transform(libFileName, libFileName.begin(), [](const char c) { return std::tolower(c); });
 
@@ -920,7 +910,7 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                     ComPtr<ID3D11Texture2D> pDepthBufferCopy = nullptr;
                     ComPtr<ID3D11Texture2D> pBackBufferCopy = nullptr;
 
-            if (config::export_openexr) {
+            if (Config::Manager::export_openexr) {
                 TRY([&] {
                     {
                         D3D11_TEXTURE2D_DESC desc;
@@ -952,7 +942,7 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                     {
                         std::lock_guard<std::mutex> sessionLock(mxSession);
                         if ((encodingSession != nullptr) && (encodingSession->isCapturing)) {
-                            encodingSession->enqueueEXRImage(p_this, pBackBufferCopy, pDepthBufferCopy);
+                            encodingSession->enqueueExrImage(p_this, pBackBufferCopy, pDepthBufferCopy);
                         }
                     }
                 });
@@ -971,12 +961,12 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                      ::exportContext->p_swap_chain->Present(1, 0)); // IMPORTANT: This call makes ENB and ReShade
                                                                     // effects to be applied to the render target
 
-            if (config::motion_blur_samples != 0) {
+            if (Config::Manager::motion_blur_samples != 0) {
                 const float current_shutter_position =
-                    (::exportContext->total_frame_num % (config::motion_blur_samples + 1)) /
-                    static_cast<float>(config::motion_blur_samples);
+                    (::exportContext->total_frame_num % (Config::Manager::motion_blur_samples + 1)) /
+                    static_cast<float>(Config::Manager::motion_blur_samples);
 
-                if (current_shutter_position >= (1 - config::motion_blur_strength)) {
+                if (current_shutter_position >= (1 - Config::Manager::motion_blur_strength)) {
                     ever::drawAdditive(pDevice, p_this, pSwapChainBuffer);
                 }
             } else {
@@ -987,8 +977,8 @@ void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceCo
                 ::exportContext->total_frame_num = 1;
             }
 
-            if ((::exportContext->total_frame_num % (::config::motion_blur_samples + 1)) ==
-                config::motion_blur_samples) {
+            if ((::exportContext->total_frame_num % (::Config::Manager::motion_blur_samples + 1)) ==
+                Config::Manager::motion_blur_samples) {
 
                 const ComPtr<ID3D11Texture2D> result = ever::divideBuffer(pDevice, p_this, ::exportContext->acc_count);
                 ::exportContext->acc_count = 0;
@@ -1142,12 +1132,12 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                 ::exportContext->video_media_type->GetGUID(MF_MT_SUBTYPE, &pixelFormat);
 
                 if (isCustomFrameRateSupported) {
-                    auto fps = config::fps;
+                    auto fps = Config::Manager::fps;
                     fps_num = fps.first;
                     fps_den = fps.second;
 
                     float gameFrameRate =
-                        (static_cast<float>(fps.first) * (static_cast<float>(config::motion_blur_samples) + 1) /
+                        (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1) /
                          static_cast<float>(fps.second));
                     
                     LOG(LL_DBG, "Effective frame rate: ", gameFrameRate, " FPS");
@@ -1167,7 +1157,7 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                 pInputMediaType->GetGUID(MF_MT_SUBTYPE, &subType);
 
                 char buffer[128];
-                std::string output_file = config::output_dir + "\\EVE-";
+                std::string output_file = Config::Manager::output_dir + "\\EVE-";
                 
                 // Dual-pass: Use saved timestamp for Pass 2, generate new one for Pass 1
                 std::string timestamp_str;
@@ -1290,9 +1280,9 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
 
                     REQUIRE(encodingSession->createContext(
-                                config::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
+                                Config::Manager::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
                                 exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
-                                config::export_openexr, openExrWidth, openExrHeight),
+                                Config::Manager::export_openexr, openExrWidth, openExrHeight),
                             "Failed to create encoding context.");
                 }
             } catch (std::exception& ex) {
@@ -1636,17 +1626,13 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     LOG(LL_DBG, "  videoEditorInterface:", videoEditorInterface);
     LOG(LL_DBG, "  montage:", montage);
     
-    // Check if this is Pass 2 (auto-triggered) or a new export
     if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
-        // This is Pass 2 - auto-triggered for video
         LOG(LL_NFO, "PASS 2 START - Auto-triggered video export");
         LOG(LL_NFO, "  Current state:", static_cast<int>(dualPassContext->state), " (PASS2_RUNNING)");
     } else {
-        // This is a new user-initiated export
-        // Check if dual-pass is needed based on effective frame rate
-        float gameFrameRate = (static_cast<float>(config::fps.first) * 
-                              (static_cast<float>(config::motion_blur_samples) + 1) / 
-                              static_cast<float>(config::fps.second));
+        float gameFrameRate = (static_cast<float>(Config::Manager::fps.first) * 
+                              (static_cast<float>(Config::Manager::motion_blur_samples) + 1) / 
+                              static_cast<float>(Config::Manager::fps.second));
         
         LOG(LL_NFO, "User-initiated export - effective frame rate: ", gameFrameRate, " FPS");
         
@@ -1661,20 +1647,18 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
             
             // This is Pass 1 - save settings and pointers
             dualPassContext->state = DualPassState::PASS1_RUNNING;
-            dualPassContext->original_fps = config::fps;
-            dualPassContext->original_motion_blur_samples = config::motion_blur_samples;
+            dualPassContext->original_fps = Config::Manager::fps;
+            dualPassContext->original_motion_blur_samples = Config::Manager::motion_blur_samples;
             dualPassContext->saved_video_editor_interface = videoEditorInterface;
             dualPassContext->saved_montage_ptr = montage;
             
             LOG(LL_NFO, "  PASS 1 will capture audio at 30 FPS, 0 motion blur");
-            LOG(LL_NFO, "  PASS 2 will capture video at ", config::fps.first, "/", config::fps.second, 
-                       " FPS, ", config::motion_blur_samples, " motion blur samples");
+            LOG(LL_NFO, "  PASS 2 will capture video at ", Config::Manager::fps.first, "/", Config::Manager::fps.second, 
+                       " FPS, ", Config::Manager::motion_blur_samples, " motion blur samples");
             LOG(LL_DBG, "  Saved pointers - interface:", videoEditorInterface, " montage:", montage);
         } else {
-            // Normal frame rate - no dual-pass needed
             LOG(LL_DBG, "Normal frame rate - single-pass export");
             
-            // Ensure dual-pass is not active from previous render
             if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
                 LOG(LL_WRN, "Dual-pass context was not IDLE - resetting");
                 dualPassContext->state = DualPassState::IDLE;
@@ -1682,7 +1666,6 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
         }
     }
     
-    // Call original function - game handles output path
     bool result = GameHooks::StartBakeProject::OriginalFunc(videoEditorInterface, montage);
     LOG(LL_DBG, "StartBakeProject original returned:", result);
     POST();
@@ -1692,9 +1675,9 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
 
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
     PRE();
-    const std::pair<int32_t, int32_t> fps = config::fps;
+    const std::pair<int32_t, int32_t> fps = Config::Manager::fps;
     const float result = 1000.0f * static_cast<float>(fps.second) /
-                         (static_cast<float>(fps.first) * (static_cast<float>(config::motion_blur_samples) + 1));
+                         (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1));
     // float result = 1000.0f / 60.0f;
     LOG(LL_NFO, "Time step: ", result);
     POST();
@@ -1702,14 +1685,14 @@ float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
 }
 
 void AutoReloadConfig() {
-    if (config::auto_reload_config) {
-        LOG_CALL(LL_DBG, config::reload());
+    if (Config::Manager::auto_reload_config) {
+        LOG_CALL(LL_DBG, Config::Manager::reload());
     }
 }
 
 void CreateNewExportContext() {
-    encodingSession.reset(new Encoder::Session());
-    NOT_NULL(encodingSession, "Could not create the session");
+    encodingSession.reset(new Encoder::EncoderSession());
+    NOT_NULL(encodingSession, "Could not create the encoding session");
     ::exportContext.reset(new ExportContext());
     NOT_NULL(::exportContext, "Could not create export context");
     
@@ -1720,10 +1703,10 @@ void CreateNewExportContext() {
         if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
             // Override config for Pass 1: 30 FPS, 0 motion blur
             LOG(LL_NFO, "  PASS 1 DETECTED - Overriding config for audio capture");
-            LOG(LL_NFO, "    Before: fps=", config::fps.first, "/", config::fps.second, 
-                        " motion_blur=", config::motion_blur_samples);
-            config::fps = std::make_pair(30, 1);
-            config::motion_blur_samples = 0;
+            LOG(LL_NFO, "    Before: fps=", Config::Manager::fps.first, "/", Config::Manager::fps.second, 
+                        " motion_blur=", Config::Manager::motion_blur_samples);
+            Config::Manager::fps = std::make_pair(30, 1);
+            Config::Manager::motion_blur_samples = 0;
             LOG(LL_NFO, "    After: fps=30/1 motion_blur=0");
             
             ::exportContext->is_audio_export_disabled = false;
@@ -1735,10 +1718,9 @@ void CreateNewExportContext() {
             LOG(LL_NFO, "    Restoring: fps=", dualPassContext->original_fps.first, "/", 
                         dualPassContext->original_fps.second, " motion_blur=", 
                         dualPassContext->original_motion_blur_samples);
-            config::fps = dualPassContext->original_fps;
-            config::motion_blur_samples = dualPassContext->original_motion_blur_samples;
+            Config::Manager::fps = dualPassContext->original_fps;
+            Config::Manager::motion_blur_samples = dualPassContext->original_motion_blur_samples;
             
-            // Keep audio ENABLED so WriteSample hook can replay buffered audio
             ::exportContext->is_audio_export_disabled = false;
             LOG(LL_NFO, "  Audio ENABLED for Pass 2 (replaying buffered audio)");
         } else {
@@ -1783,54 +1765,7 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
 
     static bool presentHooked = false;
     if (!presentHooked && pTexture && !mainSwapChain) {
-        // if (auto foregroundWindow = GetForegroundWindow()) {
-        //     ID3D11Device* pTempDevice = nullptr;
-        //     pTexture->GetDevice(&pTempDevice);
-
-        //    IDXGIDevice* pDXGIDevice = nullptr;
-        //    REQUIRE(pTempDevice->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&pDXGIDevice)),
-        //            "Failed to get IDXGIDevice");
-
-        //    IDXGIAdapter* pDXGIAdapter = nullptr;
-        //    REQUIRE(pDXGIDevice->GetAdapter(&pDXGIAdapter), "Failed to get IDXGIAdapter");
-
-        //    IDXGIFactory* pDXGIFactory = nullptr;
-        //    REQUIRE(pDXGIAdapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&pDXGIFactory)),
-        //            "Failed to get IDXGIFactory");
-
-        //    DXGI_SWAP_CHAIN_DESC tempDesc{0};
-        //    tempDesc.BufferCount = 1;
-        //    tempDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        //    tempDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        //    tempDesc.BufferDesc.Width = 800;
-        //    tempDesc.BufferDesc.Height = 600;
-        //    tempDesc.BufferDesc.RefreshRate = {30, 1};
-        //    tempDesc.OutputWindow = foregroundWindow;
-        //    tempDesc.Windowed = true;
-        //    tempDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        //    tempDesc.SampleDesc.Count = 1;
-        //    tempDesc.SampleDesc.Quality = 0;
-
-        //    bool windowedSwapChainCreated = false;
-
-        //    ComPtr<IDXGISwapChain> pTempSwapChain;
-        //    TRY([&]() {
-        //        REQUIRE(pDXGIFactory->CreateSwapChain(pTempDevice, &tempDesc,
-        //        pTempSwapChain.ReleaseAndGetAddressOf()),
-        //                "Failed to create temporary swapchain in windowed mode. Trying in fullscreen mode.");
-        //        windowedSwapChainCreated = true;
-        //    });
-
-        //    if (!windowedSwapChainCreated) {
-        //        tempDesc.Windowed = false;
-        //        REQUIRE(pDXGIFactory->CreateSwapChain(pTempDevice, &tempDesc,
-        //        pTempSwapChain.ReleaseAndGetAddressOf()),
-        //                "Failed to create temporary swapchain");
-        //    }
-
-        // PERFORM_MEMBER_HOOK_REQUIRED(IDXGISwapChain, Present, pTempSwapChain.Get());
         presentHooked = true;
-        //}
     }
 
     if (pTexture && name) {

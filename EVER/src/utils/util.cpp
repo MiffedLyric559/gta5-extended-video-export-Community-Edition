@@ -3,8 +3,8 @@
 #include <filesystem>
 
 namespace {
-void DummyFunction() {}
-} // namespace
+    void DummyFunction() {}
+}
 
 std::string AsiPath() {
     wchar_t buffer[MAX_PATH];

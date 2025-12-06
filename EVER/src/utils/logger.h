@@ -1,4 +1,3 @@
-// ReSharper disable CppClangTidyCppcoreguidelinesMacroUsage
 #pragma once
 
 #define NOMINMAX

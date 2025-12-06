@@ -1,16 +1,5 @@
 #pragma once
 
-/// Filename: MFUtility.h
-///
-/// Description:
-/// This header file contains common macros and functions that are used in the Media Foundation
-/// sample applications.
-///
-/// History:
-/// 07 Mar 2015	Aaron Clauson (aaron@sipsorcery.com)	Created.
-///
-/// License: Public
-
 #include <codecapi.h>
 #include <cstdio>
 #include <mfapi.h>
@@ -129,12 +118,6 @@ LPCSTR STRING_FROM_GUID(GUID Attr)
 	INTERNAL_GUID_TO_STRING(MFAudioFormat_MP3, 14);                   // MP3
 	INTERNAL_GUID_TO_STRING(MFAudioFormat_MPEG, 14);                  // MPEG
 
-																	  // Media sub types
-																	  //INTERNAL_GUID_TO_STRING(WMMEDIASUBTYPE_I420, 15);                  // I420
-																	  //INTERNAL_GUID_TO_STRING(WMMEDIASUBTYPE_WVC1, 0);
-																	  //INTERNAL_GUID_TO_STRING(WMMEDIASUBTYPE_WMAudioV8, 0);
-
-																	  // MP4 Media Subtypes.
 	INTERNAL_GUID_TO_STRING(MF_MT_MPEG4_SAMPLE_DESCRIPTION, 6);
 	INTERNAL_GUID_TO_STRING(MF_MT_MPEG4_CURRENT_SAMPLE_ENTRY, 6);
 	INTERNAL_GUID_TO_STRING(CODECAPI_AVEncAdaptiveMode, 9);

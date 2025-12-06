@@ -1,5 +1,7 @@
 #pragma once
 
+#define NOMINMAX  // Prevent Windows.h min/max macros from interfering with std::numeric_limits
+
 //#pragma comment(lib, "../ScriptHookV/lib/ScriptHookV.lib")
 #pragma comment(lib, "mfuuid.lib")
 
@@ -18,6 +20,8 @@
 #include <wmcodecdsp.h>
 #include <wrl.h>
 
-#include "config.h"
+#include <INIReader.h>
+
+#include "../EVER/src/config/Manager.h"
 
 #include <ImfImage.h>
