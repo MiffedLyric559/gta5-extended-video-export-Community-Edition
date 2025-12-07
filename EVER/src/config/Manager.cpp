@@ -21,7 +21,7 @@ namespace Config {
     float Manager::motion_blur_strength;
     bool Manager::export_openexr;
     bool Manager::disable_watermark;
-    VKENCODERCONFIG Manager::encoder_config;
+    FFmpeg::FFENCODERCONFIG Manager::encoder_config;
 
     static string logLevelToString(LogLevel level) {
         switch (level) {

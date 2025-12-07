@@ -3,6 +3,8 @@
 #include "SafeQueue.h"
 #include "VideoFrameTypes.h"
 #include "OpenEXRExporter.h"
+#include "FFmpegEncoder.h"
+#include "FFmpegTypes.h"
 
 #define NOMINMAX
 #include <Windows.h>
@@ -20,10 +22,6 @@
 #include <vector>
 #include <wrl.h>
 
-#pragma warning(push, 0)
-#include <VoukoderTypeLib_h.h>
-#pragma warning(pop)
-
 namespace Encoder {
     class EncoderSession {
     public:
@@ -33,7 +31,7 @@ namespace Encoder {
         EncoderSession(const EncoderSession&) = delete;
         EncoderSession& operator=(const EncoderSession&) = delete;
 
-        HRESULT createContext(const VKENCODERCONFIG& config, 
+        HRESULT createContext(const FFmpeg::FFENCODERCONFIG& config, 
                             const std::wstring& filename, 
                             uint32_t width,
                             uint32_t height, 
@@ -67,9 +65,9 @@ namespace Encoder {
         bool isCapturing = false;
 
     private:
-        Microsoft::WRL::ComPtr<IVoukoder> voukoder_;
-        VKVIDEOFRAME videoFrame_;
-        VKAUDIOCHUNK audioChunk_;
+        std::unique_ptr<FFmpegEncoder> ffmpegEncoder_;
+        FFmpeg::FFVIDEOFRAME videoFrame_;
+        FFmpeg::FFAUDIOCHUNK audioChunk_;
 
         int64_t videoPts_ = 0;
         int64_t audioPts_ = 0;

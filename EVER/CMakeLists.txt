@@ -24,12 +24,15 @@ set(Core_Source_Files
 set(Video_Header_Files
         "src/video/EncoderSession.h"
         "src/video/OpenEXRExporter.h"
-        "src/video/VideoFrameTypes.h")
+        "src/video/VideoFrameTypes.h"
+        "src/video/FFmpegEncoder.h"
+        "src/video/FFmpegTypes.h")
 
 set(Video_Source_Files
         "src/video/EncoderSession.cpp"
         "src/video/OpenEXRExporter.cpp"
-        "src/video/VideoFrameTypes.cpp")
+        "src/video/VideoFrameTypes.cpp"
+        "src/video/FFmpegEncoder.cpp")
 
 # Hooking files
 set(Hooking_Header_Files
@@ -96,9 +99,6 @@ set(Source_Files
         ${Utils_Source_Files}
         ${Resource_Files})
 
-set(VK_Source_Files
-        "../voukoder/VoukoderTypeLib_i.c")
-
 source_group("Core\\Header Files" FILES ${Core_Header_Files})
 source_group("Core\\Source Files" FILES ${Core_Source_Files})
 source_group("Video\\Header Files" FILES ${Video_Header_Files})
@@ -112,13 +112,11 @@ source_group("Utils\\Source Files" FILES ${Utils_Source_Files})
 source_group("Rendering\\Header Files" FILES ${Rendering_Header_Files})
 source_group("Include Files" FILES ${Include_Files})
 source_group("Resource Files" FILES ${Resource_Files})
-source_group("External\\Voukoder" FILES ${VK_Source_Files})
 
 set(ALL_FILES
         ${no_group_source_files}
         ${Header_Files}
         ${Source_Files}
-        ${VK_Source_Files}
         )
 ################################################################################
 # Target
@@ -229,6 +227,13 @@ target_link_options(${PROJECT_NAME} PRIVATE
         /DELAYLOAD:OpenEXR-3_1.dll;
         /DEBUG:FULL
         >
+        /DELAYLOAD:avcodec-60.dll;
+        /DELAYLOAD:avdevice-60.dll;
+        /DELAYLOAD:avfilter-9.dll;
+        /DELAYLOAD:avformat-60.dll;
+        /DELAYLOAD:avutil-58.dll;
+        /DELAYLOAD:swresample-4.dll;
+        /DELAYLOAD:swscale-7.dll;
         /DELAYLOAD:PolyHook_2.dll;
         /SUBSYSTEM:WINDOWS
         )
@@ -251,13 +256,26 @@ add_custom_command_if(
         COMMAND $<CONFIG:Debug> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
         COMMAND $<CONFIG:Debug> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
         COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVER"
+        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
         COMMAND $<CONFIG:MinSizeRel> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}>EVER"
+        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
         COMMAND $<CONFIG:Release> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
         COMMAND $<CONFIG:Release> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
         COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
         COMMAND $<CONFIG:RelWithDebInfo> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
+        COMMAND $<CONFIG:RelWithDebInfo> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
+        COMMAND $<CONFIG:RelWithDebInfo> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
+)
+
+add_custom_command(
+        TARGET ${PROJECT_NAME}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
+        COMMAND $<$<CONFIG:Debug>:xcopy> $<$<CONFIG:Debug>:/y> $<$<CONFIG:Debug>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin>/av*.dll"> $<$<CONFIG:Debug>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMAND $<$<CONFIG:Debug>:xcopy> $<$<CONFIG:Debug>:/y> $<$<CONFIG:Debug>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin>/sw*.dll"> $<$<CONFIG:Debug>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMAND $<$<NOT:$<CONFIG:Debug>>:xcopy> $<$<NOT:$<CONFIG:Debug>>:/y> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin>/av*.dll"> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMAND $<$<NOT:$<CONFIG:Debug>>:xcopy> $<$<NOT:$<CONFIG:Debug>>:/y> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin>/sw*.dll"> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMENT "Copy FFmpeg runtime DLLs"
 )
 
 ################################################################################
@@ -284,6 +302,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/
 
 # ScriptHookV
 find_library(SCRIPT_HOOK_V_LIBRARY ScriptHookV REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../ScriptHookV/lib")
+target_include_directories(${PROJECT_NAME} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../ScriptHookV"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../ScriptHookV/inc")
 target_link_libraries(${PROJECT_NAME} PRIVATE ${SCRIPT_HOOK_V_LIBRARY})
 
 # inih
@@ -302,9 +323,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE PolyHook_2::PolyHook_2)
 find_package(OpenEXR CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenEXR::OpenEXR)
 
-# Voukoder
-find_path(VOUKODER_INCLUDE_DIR VoukoderTypeLib_h.h REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../voukoder")
-target_include_directories(${PROJECT_NAME} PRIVATE ${VOUKODER_INCLUDE_DIR})
+# FFmpeg via vcpkg FindFFMPEG (module)
+find_package(FFMPEG REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
 
 # D3D11
 target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib)

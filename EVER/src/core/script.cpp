@@ -114,7 +114,6 @@ namespace {
     class ScopedFlagGuard {
     public:
         explicit ScopedFlagGuard(bool& flag) : ref(flag) { ref = true; }
-        ~ScopedFlagGuard() { ref = false; }
 
         ScopedFlagGuard(const ScopedFlagGuard&) = delete;
         ScopedFlagGuard& operator=(const ScopedFlagGuard&) = delete;
@@ -520,8 +519,6 @@ namespace {
 }
 
 void ever::OnPresent(IDXGISwapChain* p_swap_chain) {
-
-    // For some unknown reason, we need this lock to prevent black exports
     captureMainSwapChain(p_swap_chain, "IDXGISwapChain::Present");
     installFactoryHooksFromSwapChain(p_swap_chain, "IDXGISwapChain::Present");
     static bool initialized = false;
@@ -559,7 +556,7 @@ HRESULT ExportHooks::D3D11CreateDeviceAndSwapChain::Implementation(
         swapChainPtrString);
 
     if (SUCCEEDED(result) && pp_swap_chain && *pp_swap_chain) {
-        captureAndHookSwapChain(*pp_swap_chain, "D3D11CreateDeviceAndSwapChain");
+            captureAndHookSwapChain(*pp_swap_chain, "IDXGISwapChain::Present");
         installFactoryHooksFromSwapChain(*pp_swap_chain, "D3D11CreateDeviceAndSwapChain");
     }
 
@@ -781,7 +778,6 @@ void ever::initialize() {
                 LOG(LL_ERR, "Could not find the address for CreateThread function.");
             }
 
-            // Install dual-pass audio rendering hooks
             if (pStartBakeProject) {
                 PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(StartBakeProject, pStartBakeProject,
                                                       PLH::x64Detour::detour_scheme_t::INPLACE);
@@ -792,7 +788,6 @@ void ever::initialize() {
                 LOG(LL_ERR, "Dual-pass audio rendering will NOT be available!");
             }
             
-            // Disable watermark if configured
             if (Config::Manager::disable_watermark) {
                 PERFORM_SINGLE_BYTE_PATCH(pWatermarkRenderer, 0xC3, "Watermark renderer");
             } else {
@@ -1226,18 +1221,18 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
 
                 LOG(LL_NFO, "Output file: ", filename);
 
-                // Skip Voukoder encoder creation during Pass 1 (audio-only mode)
+                // Skip FFmpeg encoder creation during Pass 1 (audio-only mode)
                 // We only buffer audio in memory during Pass 1
                 if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
-                    LOG(LL_NFO, "Pass 1 (audio-only): Skipping Voukoder encoder creation");
+                    LOG(LL_NFO, "Pass 1 (audio-only): Skipping FFmpeg encoder creation");
                     LOG(LL_NFO, "Audio will be buffered in memory");
                     // Don't create encoder context - audio buffer already initialized above
                 } else {
-                    // Pass 2 or normal mode: Create full Voukoder encoder (video + audio)
+                    // Pass 2 or normal mode: Create full FFmpeg encoder (video + audio)
                     if (dualPassContext && 
                         (dualPassContext->state == DualPassState::PASS2_PENDING || 
                          dualPassContext->state == DualPassState::PASS2_RUNNING)) {
-                        LOG(LL_NFO, "Pass 2: Creating Voukoder encoder for video + buffered audio replay");
+                        LOG(LL_NFO, "Pass 2: Creating FFmpeg encoder for video + buffered audio replay");
                     }
                     DXGI_SWAP_CHAIN_DESC desc{};
                     if (bindExportSwapChainIfAvailable()) {
@@ -1341,11 +1336,11 @@ HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DW
                         if (bytes_remaining > 0) {
                             // Send the same chunk size as we're receiving (or what's left)
                             size_t chunk_size = std::min(static_cast<size_t>(length), bytes_remaining);
-                            
+
                             BYTE* buffered_audio = dualPassContext->audio_buffer.data() + dualPassContext->audio_buffer_playback_position;
                             LOG_CALL(LL_DBG, encodingSession->writeAudioFrame(
-                                                 buffered_audio, 
-                                                 chunk_size / 4 /* 2 channels * 2 bytes per sample*/, 
+                                                 buffered_audio,
+                                                 static_cast<int32_t>(chunk_size),
                                                  sampleTime));
                             
                             dualPassContext->audio_buffer_playback_position += chunk_size;
@@ -1355,9 +1350,9 @@ HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DW
                             LOG(LL_WRN, "Pass 2: Audio buffer exhausted! No more audio to send.");
                         }
                     } else {
-                        // Normal mode (no dual-pass) - send live audio to Voukoder
+                        // Normal mode (no dual-pass) - send live audio to FFmpeg
                         LOG_CALL(LL_DBG, encodingSession->writeAudioFrame(
-                                             buffer, length / 4 /* 2 channels * 2 bytes per sample*/, sampleTime));
+                                             buffer, static_cast<int32_t>(length), sampleTime));
                     }
                 } catch (std::exception& ex) {
                     LOG(LL_ERR, ex.what());
@@ -1403,8 +1398,8 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
                     (dualPassContext->audio_buffer.size() / dualPassContext->audio_block_align / dualPassContext->audio_sample_rate), 
                     " seconds");
                 
-                // Skip encoder finalization - Voukoder context was never created for audio-only mode
-                LOG(LL_NFO, "Skipping Voukoder finalization (audio-only mode)");
+                // Skip encoder finalization - FFmpeg context was never created for audio-only mode
+                LOG(LL_NFO, "Skipping FFmpeg finalization (audio-only mode)");
                 
                 dualPassContext->state = DualPassState::PASS1_COMPLETE;
                 
@@ -1448,7 +1443,7 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
             else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
                 LOG(LL_NFO, "PASS 2 COMPLETE - Video export finished");
                 
-                // Finalize Voukoder encoder
+                // Finalize FFmpeg encoder
                 LOG_CALL(LL_DBG, encodingSession->finishAudio());
                 LOG_CALL(LL_DBG, encodingSession->finishVideo());
                 LOG_CALL(LL_DBG, encodingSession->endSession());
@@ -1492,7 +1487,7 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
         LOG(LL_NFO, "  Final output: ", dualPassContext->final_output_file);
         LOG(LL_NFO, "  Audio from Pass 1 buffer: ", dualPassContext->audio_buffer.size(), " bytes");
         LOG(LL_NFO, "  Video from Pass 2: Encoded directly to file");
-        LOG(LL_NFO, "  No muxing required - single MP4 output from Voukoder!");
+        LOG(LL_NFO, "  No muxing required - single MP4 output from FFmpeg!");
         
         // Complete cleanup - reset ALL state for next render
         LOG(LL_DBG, "Resetting dual-pass context for next render...");
@@ -1626,9 +1621,9 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     LOG(LL_DBG, "  videoEditorInterface:", videoEditorInterface);
     LOG(LL_DBG, "  montage:", montage);
     
-    if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
-        LOG(LL_NFO, "PASS 2 START - Auto-triggered video export");
-        LOG(LL_NFO, "  Current state:", static_cast<int>(dualPassContext->state), " (PASS2_RUNNING)");
+                if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                    LOG(LL_NFO, "Pass 1 (audio-only): Skipping FFmpeg encoder creation");
+                    LOG(LL_NFO, "Audio will be buffered in memory");
     } else {
         float gameFrameRate = (static_cast<float>(Config::Manager::fps.first) * 
                               (static_cast<float>(Config::Manager::motion_blur_samples) + 1) / 

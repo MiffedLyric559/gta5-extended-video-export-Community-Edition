@@ -180,14 +180,44 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     case DLL_PROCESS_ATTACH:
         try {
             LOG(LL_NON, std::filesystem::current_path());
-            
+
             const std::wstring dll_path = utf8_decode(AsiPath() + R"(\EVER\dlls\)");
-            if (!SetDllDirectoryW(dll_path.c_str())) {
-                const DWORD err = ::GetLastError();
-                LOG(LL_ERR, "Failed to set DLL directory:", err);
-                return FALSE;
+
+            if (SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS)) {
+                if (!AddDllDirectory(dll_path.c_str())) {
+                    const DWORD err = ::GetLastError();
+                    LOG(LL_ERR, "AddDllDirectory failed:", err);
+                    return FALSE;
+                }
+            } else {
+                if (!SetDllDirectoryW(dll_path.c_str())) {
+                    const DWORD err = ::GetLastError();
+                    LOG(LL_ERR, "SetDllDirectory failed:", err);
+                    return FALSE;
+                }
             }
-            LOG(LL_DBG, "DLL directory set to: ", AsiPath() + R"(\EVER\dlls\)");
+
+            static const wchar_t* k_ffmpeg_dlls[] = {
+                L"avutil-58.dll",
+                L"avcodec-60.dll",
+                L"avformat-60.dll",
+                L"avfilter-9.dll",
+                L"avdevice-60.dll",
+                L"swresample-4.dll",
+                L"swscale-7.dll",
+            };
+
+            for (auto dll_name : k_ffmpeg_dlls) {
+                const std::wstring full_path = dll_path + dll_name;
+                HMODULE h = LoadLibraryW(full_path.c_str());
+                if (!h) {
+                    const DWORD err = ::GetLastError();
+                    LOG(LL_ERR, "Failed to load runtime DLL:", utf8_encode(full_path), " error:", err);
+                    return FALSE;
+                }
+                LOG(LL_DBG, "Loaded runtime DLL:", utf8_encode(full_path));
+            }
+            LOG(LL_DBG, "DLL directory set and runtimes loaded from: ", AsiPath() + R"(\EVER\dlls\)");
             
             LOG(LL_DBG, "Initializing PolyHook logger");
             PLH::Log::registerLogger(std::make_unique<PolyHookLogger>());

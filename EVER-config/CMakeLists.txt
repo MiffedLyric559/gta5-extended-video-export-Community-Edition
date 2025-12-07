@@ -12,15 +12,11 @@ set(Source_Files
     "ever-config.cpp"
 )
 
-set(VK_Source_Files
-        "../voukoder/VoukoderTypeLib_i.c")
-
-source_group("Source Files" FILES ${Source_Files} ${VK_Source_Files})
+source_group("Source Files" FILES ${Source_Files})
 
 set(ALL_FILES
 #    ${Header_Files}
     ${Source_Files}
-    ${VK_Source_Files}
 )
 
 ################################################################################
@@ -107,12 +103,10 @@ add_custom_command_if(
 
 ### Imports 
 
-# Voukoder
-find_path(VOUKODER_INCLUDE_DIR VoukoderTypeLib_h.h REQUIRED HINTS "${CMAKE_CURRENT_SOURCE_DIR}/../voukoder")
-target_include_directories(${PROJECT_NAME} PRIVATE ${VOUKODER_INCLUDE_DIR})
-
 find_package(nlohmann_json REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE comctl32 user32 gdi32)
 
 # wxwidgets
 #find_path(WXWIDGETS_INCLUDE_DIR wx/wx.h REQUIRED)

@@ -2,7 +2,7 @@
 
 #include "ConfigConstants.h"
 #include "logger.h"
-#include "VoukoderTypeLib_h.h"
+#include "FFmpegTypes.h"
 
 #include <string>
 #include <utility>
@@ -22,7 +22,7 @@ namespace Config {
         static pair<uint32_t, uint32_t> fps;
         static uint8_t motion_blur_samples;
         static float motion_blur_strength;
-        static VKENCODERCONFIG encoder_config;
+        static FFmpeg::FFENCODERCONFIG encoder_config;
 
         static void reload();
         static void save();

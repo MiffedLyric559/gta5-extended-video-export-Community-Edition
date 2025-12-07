@@ -17,6 +17,9 @@ namespace Encoder {
         PRE();
         LOG(LL_NFO, "Opening encoding session: ", reinterpret_cast<uint64_t>(this));
         
+        LOG(LL_DBG, "EncoderSession: Initializing FFmpeg encoder");
+        ffmpegEncoder_ = std::make_unique<FFmpegEncoder>();
+        
         videoFrame_.buffer = nullptr;
         videoFrame_.rowsize = nullptr;
         videoFrame_.planes = 0;
@@ -34,9 +37,10 @@ namespace Encoder {
         audioChunk_.blockSize = 0;
         audioChunk_.planes = 0;
         audioChunk_.sampleRate = 0;
-        audioChunk_.layout = ChannelLayout::Stereo;
+        audioChunk_.layout = FFmpeg::ChannelLayout::Stereo;
         memset(audioChunk_.format, 0, sizeof(audioChunk_.format));
         
+        LOG(LL_DBG, "EncoderSession: Initialization complete");
         POST();
     }
 
@@ -53,7 +57,7 @@ namespace Encoder {
         POST();
     }
 
-    HRESULT EncoderSession::createContext(const VKENCODERCONFIG& config, 
+    HRESULT EncoderSession::createContext(const FFmpeg::FFENCODERCONFIG& config, 
                                         const std::wstring& filename, 
                                         uint32_t width,
                                         uint32_t height, 
@@ -69,35 +73,35 @@ namespace Encoder {
                                         uint32_t openExrHeight) {
         PRE();
 
+        LOG(LL_DBG, "EncoderSession::createContext - Starting encoder context creation");
+        
         width_ = static_cast<int32_t>(width);
         height_ = static_cast<int32_t>(height);
 
-        ASSERT_RUNTIME(filename.length() < sizeof(VKENCODERINFO::filename) / sizeof(wchar_t), 
-                    "Filename is too long for Voukoder encoder");
+        ASSERT_RUNTIME(filename.length() < 255, 
+                    "Filename is too long for FFmpeg encoder");
         ASSERT_RUNTIME(inputChannels == 1 || inputChannels == 2 || inputChannels == 6,
                     "Invalid number of audio channels. Only 1 (mono), 2 (stereo), and 6 (5.1) are supported");
 
-        Microsoft::WRL::ComPtr<IVoukoder> voukoderInstance = nullptr;
-        REQUIRE(CoCreateInstance(CLSID_CoVoukoder, nullptr, CLSCTX_INPROC_SERVER, IID_IVoukoder,
-                                reinterpret_cast<void**>(voukoderInstance.GetAddressOf())),
-                "Failed to create Voukoder COM instance");
+        LOG(LL_DBG, "EncoderSession::createContext - Setting FFmpeg configuration");
+        REQUIRE(ffmpegEncoder_->SetConfig(config), "Failed to set FFmpeg configuration");
 
-        REQUIRE(voukoderInstance->SetConfig(config), "Failed to set Voukoder configuration");
-
-        ChannelLayout channelLayout = ChannelLayout::Stereo;
+        FFmpeg::ChannelLayout channelLayout = FFmpeg::ChannelLayout::Stereo;
         switch (inputChannels) {
             case 1:
-                channelLayout = ChannelLayout::Mono;
+                channelLayout = FFmpeg::ChannelLayout::Mono;
                 break;
             case 2:
-                channelLayout = ChannelLayout::Stereo;
+                channelLayout = FFmpeg::ChannelLayout::Stereo;
                 break;
             case 6:
-                channelLayout = ChannelLayout::FivePointOne;
+                channelLayout = FFmpeg::ChannelLayout::FivePointOne;
                 break;
         }
 
-        VKENCODERINFO encoderInfo{
+        LOG(LL_DBG, "EncoderSession::createContext - Preparing encoder info structure");
+        
+        FFmpeg::FFENCODERINFO encoderInfo{
             .application = L"Extended Video Export Revived",
             .video{
                 .enabled = true,
@@ -105,7 +109,7 @@ namespace Encoder {
                 .height = static_cast<int>(height),
                 .timebase = {static_cast<int>(fpsDenominator), static_cast<int>(fpsNumerator)},
                 .aspectratio = {1, 1},
-                .fieldorder = FieldOrder::Progressive,
+                .fieldorder = FFmpeg::FieldOrder::Progressive,
             },
             .audio{
                 .enabled = true,
@@ -117,15 +121,22 @@ namespace Encoder {
         
         filename.copy(encoderInfo.filename, std::size(encoderInfo.filename));
 
+        LOG(LL_DBG, "EncoderSession::createContext - Encoder info prepared");
+        LOG(LL_DBG, "EncoderSession::createContext - Video: ", encoderInfo.video.width, "x", encoderInfo.video.height, " @ ", fpsNumerator, "/", fpsDenominator);
+        LOG(LL_DBG, "EncoderSession::createContext - Audio: ", encoderInfo.audio.samplerate, "Hz, ", encoderInfo.audio.numberChannels, " channels");
+
         exportExr_ = exportOpenExr;
         if (exportExr_) {
+            LOG(LL_DBG, "EncoderSession::createContext - OpenEXR export enabled");
             std::string exrOutputPath = utf8_encode(filename) + ".OpenEXR";
             exrExporter_.initialize(exrOutputPath, openExrWidth, openExrHeight);
         }
 
-        REQUIRE(voukoderInstance->Open(encoderInfo), "Failed to open Voukoder encoder");
-        LOG(LL_NFO, "Voukoder encoder opened successfully");
+        LOG(LL_NFO, "EncoderSession::createContext - Opening FFmpeg encoder");
+        REQUIRE(ffmpegEncoder_->Open(encoderInfo), "Failed to open FFmpeg encoder");
+        LOG(LL_NFO, "FFmpeg encoder opened successfully");
 
+        LOG(LL_DBG, "EncoderSession::createContext - Initializing video frame structure");
         videoFrame_ = {
             .buffer = new byte*[1],
             .rowsize = new int[1],
@@ -136,6 +147,7 @@ namespace Encoder {
         };
         inputPixelFormat.copy(videoFrame_.format, std::size(videoFrame_.format));
 
+        LOG(LL_DBG, "EncoderSession::createContext - Initializing audio chunk structure");
         audioChunk_ = {
             .buffer = new byte*[1],
             .samples = 0,
@@ -146,10 +158,13 @@ namespace Encoder {
         };
         inputSampleFormat.copy(audioChunk_.format, std::size(audioChunk_.format));
 
-        voukoder_ = std::move(voukoderInstance);
+        audioBlockAlign_ = static_cast<int32_t>(inputAlign);
+        inputAudioChannels_ = static_cast<int32_t>(inputChannels);
+        inputAudioSampleRate_ = static_cast<int32_t>(inputSampleRate);
 
         isCapturing = true;
 
+        LOG(LL_NFO, "EncoderSession::createContext - Encoder context creation complete");
         POST();
         return S_OK;
     }
@@ -204,16 +219,19 @@ namespace Encoder {
             return E_FAIL;
         }
 
+        LOG(LL_TRC, "EncoderSession::writeVideoFrame - Writing video frame, length: ", length, ", rowPitch: ", rowPitch, ", PTS: ", presentationTime);
+        
         videoFrame_.buffer[0] = data;
         videoFrame_.rowsize[0] = rowPitch;
 
-        REQUIRE(voukoder_->SendVideoFrame(videoFrame_), "Failed to send video frame to Voukoder");
+        LOG(LL_TRC, "EncoderSession::writeVideoFrame - Sending frame to FFmpeg encoder");
+        REQUIRE(ffmpegEncoder_->SendVideoFrame(videoFrame_), "Failed to send video frame to FFmpeg");
 
         POST();
         return S_OK;
     }
 
-    HRESULT EncoderSession::writeAudioFrame(BYTE* data, int32_t length, LONGLONG presentationTime) {
+    HRESULT EncoderSession::writeAudioFrame(BYTE* data, int32_t lengthBytes, LONGLONG presentationTime) {
         PRE();
 
         if (isBeingDeleted_) {
@@ -221,10 +239,26 @@ namespace Encoder {
             return E_FAIL;
         }
 
-        audioChunk_.buffer[0] = data;
-        audioChunk_.samples = length;
+        LOG(LL_TRC, "EncoderSession::writeAudioFrame - Writing audio frame, bytes: ", lengthBytes, ", PTS: ", presentationTime);
 
-        REQUIRE(voukoder_->SendAudioSampleChunk(audioChunk_), "Failed to send audio chunk to Voukoder");
+        if (audioBlockAlign_ <= 0) {
+            LOG(LL_ERR, "EncoderSession::writeAudioFrame - Invalid audio block alignment");
+            POST();
+            return E_FAIL;
+        }
+
+        const int32_t samples = lengthBytes / audioBlockAlign_;
+        if (samples <= 0) {
+            LOG(LL_ERR, "EncoderSession::writeAudioFrame - Computed non-positive sample count, bytes: ", lengthBytes, " blockAlign: ", audioBlockAlign_);
+            POST();
+            return E_FAIL;
+        }
+
+        audioChunk_.buffer[0] = data;
+        audioChunk_.samples = samples;
+
+        LOG(LL_TRC, "EncoderSession::writeAudioFrame - Sending audio chunk to FFmpeg encoder");
+        REQUIRE(ffmpegEncoder_->SendAudioSampleChunk(audioChunk_), "Failed to send audio chunk to FFmpeg");
 
         POST();
         return S_OK;
@@ -299,10 +333,11 @@ namespace Encoder {
         isCapturing = false;
         LOG(LL_NFO, "Ending encoding session...");
 
-        if (voukoder_) {
-            LOG_IF_FAILED(voukoder_->Close(true), "Failed to close Voukoder encoder");
+        if (ffmpegEncoder_) {
+            LOG(LL_DBG, "EncoderSession::endSession - Closing FFmpeg encoder");
+            LOG_IF_FAILED(ffmpegEncoder_->Close(true), "Failed to close FFmpeg encoder");
         } else {
-            LOG(LL_DBG, "Voukoder instance was never created (audio-only mode)");
+            LOG(LL_DBG, "FFmpeg encoder instance was never created (audio-only mode)");
         }
 
         isSessionFinished_ = true;
