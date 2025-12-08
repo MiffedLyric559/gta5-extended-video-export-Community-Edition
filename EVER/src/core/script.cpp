@@ -1191,7 +1191,8 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     LOG(LL_DBG, "SetInputMediaType: dualPassContext state = ", static_cast<int>(dualPassContext->state));
                     if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
                         // Pass 1: audio only (in-memory capture)
-                        dualPassContext->final_output_file = output_file + ".mp4";
+                        std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                        dualPassContext->final_output_file = output_file + extension;
                         LOG(LL_NFO, "Pass 1 audio output: IN-MEMORY BUFFER");
                         LOG(LL_NFO, "Pass 1 final output will be: ", dualPassContext->final_output_file);
                         
@@ -1212,11 +1213,13 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                         LOG(LL_NFO, "  Buffered audio size: ", dualPassContext->audio_buffer.size(), " bytes");
                     } else {
                         LOG(LL_DBG, "SetInputMediaType: State not PASS1 or PASS2, using default filename");
-                        filename = output_file + ".mp4";
+                        std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                        filename = output_file + extension;
                     }
                 } else {
                     LOG(LL_DBG, "SetInputMediaType: No dualPassContext, using default filename");
-                    filename = output_file + ".mp4";
+                    std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                    filename = output_file + extension;
                 }
 
                 LOG(LL_NFO, "Output file: ", filename);
