@@ -18,6 +18,9 @@ namespace ever {
 
 static bool g_overlay_was_open_before_export = false;
 static reshade::api::effect_runtime* g_current_runtime = nullptr;
+static bool g_script_registered = false;
+static bool g_initialized = false;
+static bool g_reshade_registered = false;
 
 static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool open, reshade::api::input_source source)
 {
@@ -226,6 +229,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
                 LOG(LL_NON, "Successfully registered with Reshade!");
                 reshade::register_overlay(nullptr, draw_eve_settings);
                 reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
+                g_reshade_registered = true;
             } else {
                 LOG(LL_ERR, "Failed to register with Reshade! EVE requires Reshade to function.");
                 return FALSE;
@@ -240,8 +244,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
             }
             Logger::instance().level = Config::Manager::log_level;
             LOG_CALL(LL_DBG, ever::initialize());
+            g_initialized = true;
             LOG(LL_NFO, "Registering script...");
             LOG_CALL(LL_DBG, scriptRegister(hModule, ever::ScriptMain));
+            g_script_registered = true;
         }
         catch (const std::exception& e) {
             LOG(LL_ERR, "C++ exception during DLL initialization:", e.what());
@@ -255,9 +261,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     case DLL_PROCESS_DETACH:
         try {
             LOG(LL_NFO, "Unregistering DXGI callback");
-            LOG_CALL(LL_DBG, scriptUnregister(hModule));
-            LOG_CALL(LL_DBG, ever::finalize());
-            reshade::unregister_addon(hModule);
+
+            if (g_script_registered) {
+                LOG_CALL(LL_DBG, scriptUnregister(hModule));
+            } else {
+                LOG(LL_DBG, "Skipping scriptUnregister; script was never registered");
+            }
+
+            if (g_initialized) {
+                LOG_CALL(LL_DBG, ever::finalize());
+            }
+
+            if (g_reshade_registered) {
+                reshade::unregister_addon(hModule);
+            }
         }
         catch (...) { }
         break;
