@@ -228,15 +228,77 @@ namespace Encoder {
             return hr;
         }
         
+        // If pixel format not set, use a default
+        if (videoCodecContext_->pix_fmt == AV_PIX_FMT_NONE) {
+            LOG(LL_WRN, "FFmpegEncoder::InitializeVideoEncoder - Pixel format not set, using default");
+            if (codec->pix_fmts) {
+                videoCodecContext_->pix_fmt = codec->pix_fmts[0];
+                LOG(LL_NFO, "FFmpegEncoder::InitializeVideoEncoder - Set pixel format to: ", av_get_pix_fmt_name(videoCodecContext_->pix_fmt));
+            }
+        }
+        
+        LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Final pixel format: ", av_get_pix_fmt_name(videoCodecContext_->pix_fmt));
+        LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Codec has constraints:");
+        LOG(LL_DBG, "  Width: ", videoCodecContext_->width, ", Height: ", videoCodecContext_->height);
+        LOG(LL_DBG, "  Time base: ", videoCodecContext_->time_base.num, "/", videoCodecContext_->time_base.den);
+        LOG(LL_DBG, "  Frame rate: ", videoCodecContext_->framerate.num, "/", videoCodecContext_->framerate.den);
+        
+        // Check if pixel format is supported by codec
+        if (codec->pix_fmts) {
+            bool pix_fmt_supported = false;
+            for (int i = 0; codec->pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
+                if (codec->pix_fmts[i] == videoCodecContext_->pix_fmt) {
+                    pix_fmt_supported = true;
+                    break;
+                }
+            }
+            if (!pix_fmt_supported) {
+                LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Pixel format ", av_get_pix_fmt_name(videoCodecContext_->pix_fmt), " is NOT supported by codec!");
+                LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Supported formats:");
+                for (int i = 0; codec->pix_fmts[i] != AV_PIX_FMT_NONE; i++) {
+                    LOG(LL_ERR, "  - ", av_get_pix_fmt_name(codec->pix_fmts[i]));
+                }
+            } else {
+                LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Pixel format is supported by codec");
+            }
+        }
+        
         if (formatContext_->oformat->flags & AVFMT_GLOBALHEADER) {
             LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Setting global header flag");
             videoCodecContext_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
         
+        LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - About to open codec with:");
+        LOG(LL_DBG, "  Codec: ", codec->name);
+        LOG(LL_DBG, "  Resolution: ", videoCodecContext_->width, "x", videoCodecContext_->height);
+        LOG(LL_DBG, "  Pixel format: ", av_get_pix_fmt_name(videoCodecContext_->pix_fmt));
+        LOG(LL_DBG, "  Time base: ", videoCodecContext_->time_base.num, "/", videoCodecContext_->time_base.den);
+        
         LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Opening video codec");
         int ret = avcodec_open2(videoCodecContext_, codec, nullptr);
         if (ret < 0) {
-            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Failed to open codec, error code: ", ret);
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Failed to open codec, error code: ", ret, " (", errbuf, ")");
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Codec: ", config_.video.encoder);
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Resolution: ", videoCodecContext_->width, "x", videoCodecContext_->height);
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Pixel format: ", av_get_pix_fmt_name(videoCodecContext_->pix_fmt));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Options: ", config_.video.options);
+            
+            // Try to get more details from priv_data if available
+            if (videoCodecContext_->priv_data) {
+                LOG(LL_ERR, "FFmpegEncoder::InitializeVideoEncoder - Checking codec private options:");
+                const AVOption *opt = nullptr;
+                void *obj = videoCodecContext_->priv_data;
+                while ((opt = av_opt_next(obj, opt))) {
+                    uint8_t *val_str = nullptr;
+                    if (av_opt_get(obj, opt->name, 0, &val_str) >= 0) {
+                        LOG(LL_ERR, "    ", opt->name, " = ", (const char*)val_str);
+                        av_free(val_str);
+                    }
+                }
+            }
+            
             POST();
             return E_FAIL;
         }
@@ -478,7 +540,9 @@ namespace Encoder {
                 if (ret < 0) {
                     ret = av_opt_set(codecContext, key.c_str(), value.c_str(), 0);
                     if (ret < 0) {
-                        LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Failed to set option '", key, "' to '", value, "', error code: ", ret);
+                        char errbuf[256];
+                        av_strerror(ret, errbuf, sizeof(errbuf));
+                        LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Failed to set option '", key, "' to '", value, "', error code: ", ret, " (", errbuf, ")");
                     } else {
                         LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Set codec context option: ", key, " = ", value);
                         optionCount++;

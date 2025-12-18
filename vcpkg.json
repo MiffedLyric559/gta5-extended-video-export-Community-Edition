@@ -22,6 +22,7 @@
         "swscale",
         "gpl",
         "x264",
+        "x265",
         "nvcodec",
         "amf",
         "qsv",

@@ -130,6 +130,14 @@ private:
     static std::string buildVideoOptionsString(const nlohmann::json& video) {
         std::ostringstream oss;
         std::vector<std::string> options;
+        std::vector<std::string> x265_params; // For x265-specific params
+        
+        // Check if this is x265 codec
+        bool is_x265 = false;
+        if (video.contains("codec")) {
+            std::string codec = video["codec"].get<std::string>();
+            is_x265 = (codec == "libx265" || codec == "hevc");
+        }
         
         if (video.contains("pixel_format") && video["pixel_format"] != "auto") {
             options.push_back("_pixelFormat=" + video["pixel_format"].get<std::string>());
@@ -227,19 +235,44 @@ private:
             }
         }
         
+        // For x265, level goes into x265-params, for others use direct option
         if (video.contains("level") && video["level"] != "none" && video["level"] != "auto") {
+            std::string level_value;
             if (video["level"].is_string()) {
-                options.push_back("level=" + video["level"].get<std::string>());
-            } else {
-                options.push_back("level=" + std::to_string(video["level"].get<double>()));
+                level_value = video["level"].get<std::string>();
+                // Convert "5.1" format to "5.1" for x265-params (x265 accepts both)
+                size_t dot_pos = level_value.find('.');
+                if (is_x265 && dot_pos != std::string::npos) {
+                    // x265-params accepts "5.1" format
+                    x265_params.push_back("level=" + level_value);
+                } else {
+                    options.push_back("level=" + level_value);
+                }
+            } else if (video["level"].is_number()) {
+                double level_num = video["level"].get<double>();
+                if (is_x265) {
+                    x265_params.push_back("level=" + std::to_string(level_num));
+                } else {
+                    options.push_back("level=" + std::to_string(level_num));
+                }
             }
         }
         
+        // For x265, keyint goes into x265-params, for others use g=
         if (video.contains("gopsize") && video["gopsize"] != "auto") {
+            std::string gop_value;
             if (video["gopsize"].is_string()) {
-                options.push_back("g=" + video["gopsize"].get<std::string>());
+                gop_value = video["gopsize"].get<std::string>();
             } else if (video["gopsize"].is_number()) {
-                options.push_back("g=" + std::to_string(video["gopsize"].get<int>()));
+                gop_value = std::to_string(video["gopsize"].get<int>());
+            }
+            
+            if (!gop_value.empty()) {
+                if (is_x265) {
+                    x265_params.push_back("keyint=" + gop_value);
+                } else {
+                    options.push_back("g=" + gop_value);
+                }
             }
         }
         
@@ -293,6 +326,16 @@ private:
         for (size_t i = 0; i < options.size(); ++i) {
             if (i > 0) oss << "|";
             oss << options[i];
+        }
+        
+        // Add x265-params if any x265-specific options were collected
+        if (!x265_params.empty()) {
+            if (!options.empty()) oss << "|";
+            oss << "x265-params=";
+            for (size_t i = 0; i < x265_params.size(); ++i) {
+                if (i > 0) oss << ":";
+                oss << x265_params[i];
+            }
         }
         
         return oss.str();
