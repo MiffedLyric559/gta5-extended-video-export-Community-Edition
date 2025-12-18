@@ -62,11 +62,13 @@ set(Utils_Header_Files
         "src/utils/JsonPresetReader.h"
         "src/utils/logger.h"
         "src/utils/SafeQueue.h"
-        "src/utils/util.h")
+        "src/utils/util.h"
+        "src/utils/CrashHandler.h")
 
 set(Utils_Source_Files
         "src/utils/logger.cpp"
-        "src/utils/util.cpp")
+        "src/utils/util.cpp"
+        "src/utils/CrashHandler.cpp")
 
 # Rendering files
 set(Rendering_Header_Files
@@ -271,11 +273,9 @@ add_custom_command(
         TARGET ${PROJECT_NAME}
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
-        COMMAND $<$<CONFIG:Debug>:xcopy> $<$<CONFIG:Debug>:/y> $<$<CONFIG:Debug>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin>/av*.dll"> $<$<CONFIG:Debug>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
-        COMMAND $<$<CONFIG:Debug>:xcopy> $<$<CONFIG:Debug>:/y> $<$<CONFIG:Debug>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin>/sw*.dll"> $<$<CONFIG:Debug>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
-        COMMAND $<$<NOT:$<CONFIG:Debug>>:xcopy> $<$<NOT:$<CONFIG:Debug>>:/y> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin>/av*.dll"> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
-        COMMAND $<$<NOT:$<CONFIG:Debug>>:xcopy> $<$<NOT:$<CONFIG:Debug>>:/y> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin>/sw*.dll"> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
-        COMMENT "Copy FFmpeg runtime DLLs"
+        COMMAND $<$<CONFIG:Debug>:xcopy> $<$<CONFIG:Debug>:/y> $<$<CONFIG:Debug>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin>\\*.dll"> $<$<CONFIG:Debug>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMAND $<$<NOT:$<CONFIG:Debug>>:xcopy> $<$<NOT:$<CONFIG:Debug>>:/y> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin>\\*.dll"> $<$<NOT:$<CONFIG:Debug>>:"$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>">
+        COMMENT "Copy FFmpeg and codec runtime DLLs"
 )
 
 ################################################################################
@@ -331,6 +331,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
 
 # D3D11
 target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib)
+
+# DbgHelp and Psapi for crash handling
+target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp.lib psapi.lib)
 
 # Media Foundation
 target_link_libraries(${PROJECT_NAME} PRIVATE mfreadwrite.lib mfplat.lib mfuuid.lib)

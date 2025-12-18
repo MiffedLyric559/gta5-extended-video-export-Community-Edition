@@ -20,7 +20,16 @@
         "avformat",
         "swresample",
         "swscale",
-        "x264"
+        "gpl",
+        "x264",
+        "nvcodec",
+        "amf",
+        "qsv",
+        "aom",
+        "vpx",
+        "opus",
+        "mp3lame",
+        "vorbis"
       ]
     }
   ],
