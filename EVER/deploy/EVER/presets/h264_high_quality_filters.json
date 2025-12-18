@@ -1,0 +1,52 @@
+{
+  "format": {
+    "container": "mp4",
+    "clip": false,
+    "faststart": true
+  },
+  "video": {
+    "codec": "libx264",
+    "preset": "veryfast",
+    "pass": "1",
+    "crf": 23,
+    "bitrate": "auto",
+    "minrate": "2500k",
+    "maxrate": "5000k",
+    "bufsize": "10000k",
+    "gopsize": 256,
+    "pixel_format": "yuv420p",
+    "frame_rate": "30",
+    "speed": "auto",
+    "tune": "film",
+    "profile": "high",
+    "level": "4.1",
+    "faststart": true,
+    "size": "auto",
+    "width": "1920",
+    "height": "1080",
+    "format": "widescreen",
+    "aspect": "16:9",
+    "scaling": "bilinear",
+    "codec_options": ""
+  },
+  "audio": {
+    "codec": "aac",
+    "channel": "stereo",
+    "quality": "256k",
+    "sampleRate": "48000",
+    "volume": "100"
+  },
+  "filter": {
+    "deband": true,
+    "deshake": true,
+    "deflicker": true,
+    "dejudder": true,
+    "denoise": "medium",
+    "deinterlace": "field",
+    "brightness": "-0.31",
+    "contrast": "1.22",
+    "saturation": "1.5",
+    "gamma": "1.2",
+    "acontrast": "33"
+  }
+}

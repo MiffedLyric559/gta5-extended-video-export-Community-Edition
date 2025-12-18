@@ -1,26 +1,26 @@
 {
   "format": {
-    "container": "mp4",
+    "container": "mov",
     "clip": false,
-    "faststart": true
+    "faststart": false
   },
   "video": {
-    "codec": "libx264",
-    "preset": "medium",
+    "codec": "prores_ks",
+    "preset": "none",
     "pass": "1",
-    "crf": 17,
-    "bitrate": "5000k",
+    "crf": 0,
+    "bitrate": "auto",
     "minrate": "auto",
     "maxrate": "auto",
     "bufsize": "auto",
-    "gopsize": 480,
-    "pixel_format": "yuv420p",
+    "gopsize": 1,
+    "pixel_format": "yuv422p10le",
     "frame_rate": "auto",
     "speed": "auto",
     "tune": "none",
-    "profile": "none",
+    "profile": "3",
     "level": "none",
-    "faststart": true,
+    "faststart": false,
     "size": "auto",
     "width": "auto",
     "height": "auto",
@@ -30,10 +30,10 @@
     "codec_options": ""
   },
   "audio": {
-    "codec": "aac",
+    "codec": "pcm_s16le",
     "channel": "source",
-    "quality": "320k",
-    "sampleRate": "auto",
+    "quality": "auto",
+    "sampleRate": "48000",
     "volume": "100"
   },
   "filter": {

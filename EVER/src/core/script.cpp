@@ -1152,7 +1152,7 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                 pInputMediaType->GetGUID(MF_MT_SUBTYPE, &subType);
 
                 char buffer[128];
-                std::string output_file = Config::Manager::output_dir + "\\EVE-";
+                std::string output_file = Config::Manager::output_dir + "\\EVER-";
                 
                 // Dual-pass: Use saved timestamp for Pass 2, generate new one for Pass 1
                 std::string timestamp_str;
