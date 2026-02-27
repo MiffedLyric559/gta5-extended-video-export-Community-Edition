@@ -124,8 +124,11 @@ DEFINE_X64_HOOK(CreateExportContext, uint8_t,
                 uint32_t height,
                 void* r9d);
 
-using IsPendingPendingBakeStartFunc = bool(*)();
-
 DEFINE_X64_HOOK(StartBakeProject, bool,
                 void* videoEditorInterface,  // this pointer (RCX)
                 void* montage);              // CReplayMontage* (RDX)
+
+// Dual-pass cleanup and UI control hooks
+DEFINE_X64_HOOK(CleanupReplayPlaybackInternal, void);
+
+DEFINE_X64_HOOK(IsPendingBakeStart, bool);

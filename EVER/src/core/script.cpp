@@ -180,7 +180,19 @@ namespace {
 
     std::unique_ptr<DualPassContext> dualPassContext;
 
-    IsPendingPendingBakeStartFunc pIsPendingPendingBakeStartFunc = nullptr;
+    // Manual hooks for functions that can't use PolyHook
+    using CleanupReplayPlaybackInternalFunc = void(*)();
+    CleanupReplayPlaybackInternalFunc pCleanupReplayPlaybackOriginal = nullptr;
+    void* pCleanupReplayPlaybackTrampoline = nullptr;
+    uint8_t g_cleanupOriginalBytes[12] = {0}; // Store original bytes for safe unhook/rehook
+    
+    // KillPlaybackOrBake hook (manual hook with unhook/rehook pattern)
+    using KillPlaybackOrBakeFunc = void(*)(void* thisPtr, bool userCancelled);
+    KillPlaybackOrBakeFunc pKillPlaybackOrBakeOriginal = nullptr;
+    uint8_t g_killPlaybackOrBakeOriginalBytes[12] = {0};
+    
+    // Store IsPendingBakeStart address for hook to access
+    uint64_t g_isPendingBakeStartAddress = 0;
 
     bool bindExportSwapChainIfAvailableLocked() {
         if (!exportContext) {
@@ -427,6 +439,375 @@ namespace {
         LOG(LL_DBG, "Installed absolute jump hook at", Logger::hex(address, 16), " -> ",
             Logger::hex(static_cast<uint64_t>(hookAddress), 16));
         return true;
+    }
+
+    // Manual hook CleanupReplayPlaybackInternal
+    bool installManualHookWithTrampoline(uint64_t targetAddress, uintptr_t hookAddress, void** outTrampoline) {
+        if (targetAddress == 0 || hookAddress == 0) {
+            return false;
+        }
+
+        constexpr size_t patchSize = 12; // Size
+        constexpr size_t trampolineSize = patchSize + 12; // Original bytes + jump back
+
+        // Allocate executable memory for trampoline
+        void* trampoline = VirtualAlloc(nullptr, trampolineSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!trampoline) {
+            LOG(LL_ERR, "Failed to allocate trampoline memory");
+            return false;
+        }
+
+        // Copy original bytes to trampoline
+        std::memcpy(trampoline, reinterpret_cast<void*>(targetAddress), patchSize);
+
+        // Add jump back to (original + patchSize) at end of trampoline
+        uint8_t* trampolineBytes = static_cast<uint8_t*>(trampoline);
+        uint64_t returnAddress = targetAddress + patchSize;
+        
+        trampolineBytes[patchSize + 0] = 0x48; // mov rax, imm64
+        trampolineBytes[patchSize + 1] = 0xB8;
+        std::memcpy(&trampolineBytes[patchSize + 2], &returnAddress, sizeof(returnAddress));
+        trampolineBytes[patchSize + 10] = 0xFF; // jmp rax
+        trampolineBytes[patchSize + 11] = 0xE0;
+
+        FlushInstructionCache(GetCurrentProcess(), trampoline, trampolineSize);
+
+        if (!installAbsoluteJumpHook(targetAddress, hookAddress)) {
+            VirtualFree(trampoline, 0, MEM_RELEASE);
+            return false;
+        }
+
+        *outTrampoline = trampoline;
+        LOG(LL_NFO, "Manual hook with trampoline installed at", Logger::hex(targetAddress, 16), 
+            "-> hook:", Logger::hex(hookAddress, 16), "trampoline:", trampoline);
+        return true;
+    }
+
+    void CleanupReplayPlaybackInternal_Hook() {
+        PRE();
+        LOG(LL_NFO, "CleanupReplayPlaybackInternal called");
+        
+        if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
+            LOG(LL_NFO, "Intercepting CleanupReplayPlaybackInternal after Pass 1");
+            try {
+                uint64_t cleanupAddr = reinterpret_cast<uint64_t>(pCleanupReplayPlaybackOriginal);
+                
+                LOG(LL_DBG, "Temporarily restoring original bytes at 0x", std::hex, cleanupAddr);
+                
+                // Restore original bytes
+                DWORD oldProtect;
+                if (!VirtualProtect(reinterpret_cast<void*>(cleanupAddr), 12, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                    LOG(LL_ERR, "VirtualProtect failed (restore): ", GetLastError());
+                    dualPassContext->state = DualPassState::IDLE;
+                    dualPassContext->audio_buffer.clear();
+                    POST();
+                    return;
+                }
+                
+                memcpy(reinterpret_cast<void*>(cleanupAddr), g_cleanupOriginalBytes, 12);
+                FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(cleanupAddr), 12);
+                
+                LOG(LL_DBG, "Calling original CleanupReplayPlaybackInternal...");
+                reinterpret_cast<CleanupReplayPlaybackInternalFunc>(cleanupAddr)();
+                LOG(LL_NFO, "Original cleanup completed - playback controller reset");
+                
+                // Re-install the hook
+                LOG(LL_DBG, "Re-installing hook...");
+                installAbsoluteJumpHook(cleanupAddr, 
+                    reinterpret_cast<uintptr_t>(&CleanupReplayPlaybackInternal_Hook));
+                
+                VirtualProtect(reinterpret_cast<void*>(cleanupAddr), 12, oldProtect, &oldProtect);
+            }
+            catch (const std::exception& e) {
+                LOG(LL_ERR, "Exception during unhook/rehook: ", e.what());
+                dualPassContext->state = DualPassState::IDLE;
+                dualPassContext->audio_buffer.clear();
+                POST();
+                return;
+            }
+            catch (...) {
+                LOG(LL_ERR, "Unknown exception during unhook/rehook");
+                dualPassContext->state = DualPassState::IDLE;
+                dualPassContext->audio_buffer.clear();
+                POST();
+                return;
+            }
+            
+            // Pass 2
+            std::thread([]() {
+                LOG(LL_NFO, "=== Pass 2 Trigger Thread Started ===");
+                LOG(LL_DBG, "Thread ID: ", std::this_thread::get_id());
+                
+                // Wait for cleanup to fully complete and GTA to settle
+                LOG(LL_DBG, "Waiting 1 second for GTA to fully reset state...");
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                
+                if (!dualPassContext) {
+                    LOG(LL_ERR, "Pass 2 thread: dualPassContext is NULL!");
+                    return;
+                }
+                
+                if (dualPassContext->state != DualPassState::PASS1_COMPLETE) {
+                    LOG(LL_WRN, "Pass 2 thread: Unexpected state: ", static_cast<int>(dualPassContext->state));
+                    LOG(LL_WRN, "Expected PASS1_COMPLETE (2), got: ", static_cast<int>(dualPassContext->state));
+                    return;
+                }
+                
+                LOG(LL_NFO, "Starting Pass 2 (Video Export)");
+                
+                dualPassContext->state = DualPassState::PASS2_PENDING;
+                LOG(LL_NFO, "State changed to PASS2_PENDING");
+                
+                // Restore original FPS settings
+                Config::Manager::fps = dualPassContext->original_fps;
+                Config::Manager::motion_blur_samples = dualPassContext->original_motion_blur_samples;
+                
+                LOG(LL_DBG, "  Restoring FPS: ", Config::Manager::fps.first, "/", Config::Manager::fps.second);
+                LOG(LL_DBG, "  Motion blur: ", Config::Manager::motion_blur_samples);
+                LOG(LL_DBG, "  Video editor interface ptr: ", reinterpret_cast<void*>(dualPassContext->saved_video_editor_interface));
+                LOG(LL_DBG, "  Montage ptr: ", reinterpret_cast<void*>(dualPassContext->saved_montage_ptr));
+                LOG(LL_DBG, "  Audio buffer size: ", dualPassContext->audio_buffer.size(), " bytes");
+                
+                if (!GameHooks::StartBakeProject::OriginalFunc) {
+                    LOG(LL_ERR, "StartBakeProject::OriginalFunc is NULL!");
+                    dualPassContext->state = DualPassState::IDLE;
+                    return;
+                }
+                
+                if (!dualPassContext->saved_video_editor_interface) {
+                    LOG(LL_ERR, "saved_video_editor_interface is NULL!");
+                    dualPassContext->state = DualPassState::IDLE;
+                    return;
+                }
+                
+                if (!dualPassContext->saved_montage_ptr) {
+                    LOG(LL_ERR, "saved_montage_ptr is NULL!");
+                    dualPassContext->state = DualPassState::IDLE;
+                    return;
+                }
+                
+                dualPassContext->state = DualPassState::PASS2_RUNNING;
+                LOG(LL_NFO, "State changed to PASS2_RUNNING");
+                LOG(LL_DBG, "About to call StartBakeProject original function...");
+                
+                bool result = false;
+                try {
+                    result = GameHooks::StartBakeProject::OriginalFunc(
+                        dualPassContext->saved_video_editor_interface,
+                        dualPassContext->saved_montage_ptr
+                    );
+                    LOG(LL_DBG, "StartBakeProject call completed without exception");
+                } catch (const std::exception& e) {
+                    LOG(LL_ERR, "Exception calling StartBakeProject: ", e.what());
+                } catch (...) {
+                    LOG(LL_ERR, "Unknown exception calling StartBakeProject");
+                }
+                
+                LOG(LL_NFO, "Pass 2 StartBakeProject returned: ", result);
+                
+                if (!result) {
+                    LOG(LL_ERR, "Pass 2 FAILED to start");
+                    LOG(LL_ERR, "This typically means GTA rejected the StartBakeProject call");
+                    LOG(LL_ERR, "Possible reasons:");
+                    LOG(LL_ERR, "  1. Playback controller still valid (should be reset by now)");
+                    LOG(LL_ERR, "  2. VideoRecording::StartRecording failed");
+                    LOG(LL_ERR, "  3. Insufficient resources or disk space");
+                    LOG(LL_ERR, "Resetting dual-pass context...");
+                    
+                    dualPassContext->state = DualPassState::IDLE;
+                    dualPassContext->audio_buffer.clear();
+                    dualPassContext->audio_buffer.shrink_to_fit();
+                } else {
+                    LOG(LL_NFO, "Pass 2 started successfully");
+                    LOG(LL_DBG, "Video capture should now begin at ", Config::Manager::fps.first, "/", Config::Manager::fps.second, " FPS");
+                }
+            }).detach();
+            
+            // Return early
+            LOG(LL_NFO, "Pass 2 thread spawned after cleanup");
+            POST();
+            return;
+            
+        } else {
+            // Normal cleanup
+            LOG(LL_DBG, "Normal CleanupReplayPlaybackInternal execution");
+            if (dualPassContext) {
+                LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
+                LOG(LL_DBG, "  Calling original cleanup to free resources properly");
+            }
+            
+            // Temporarily unhook to call original
+            try {
+                uint64_t cleanupAddr = reinterpret_cast<uint64_t>(pCleanupReplayPlaybackOriginal);
+                
+                DWORD oldProtect;
+                if (!VirtualProtect(reinterpret_cast<void*>(cleanupAddr), 12, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                    LOG(LL_ERR, "VirtualProtect failed (normal cleanup): ", GetLastError());
+                    POST();
+                    return;
+                }
+                
+                // Restore original bytes
+                memcpy(reinterpret_cast<void*>(cleanupAddr), g_cleanupOriginalBytes, 12);
+                FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(cleanupAddr), 12);
+                
+                // Call original
+                reinterpret_cast<CleanupReplayPlaybackInternalFunc>(cleanupAddr)();
+                
+                // Re-install hook
+                installAbsoluteJumpHook(cleanupAddr, 
+                    reinterpret_cast<uintptr_t>(&CleanupReplayPlaybackInternal_Hook));
+                
+                VirtualProtect(reinterpret_cast<void*>(cleanupAddr), 12, oldProtect, &oldProtect);
+                
+                LOG(LL_DBG, "Original cleanup completed and hook reinstalled");
+            }
+            catch (const std::exception& e) {
+                LOG(LL_ERR, "Exception during normal cleanup: ", e.what());
+            }
+            catch (...) {
+                LOG(LL_ERR, "Unknown exception during normal cleanup");
+            }
+            
+            // Reset dual-pass after Pass 2 completes (if in dual-pass mode)
+            if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
+                LOG(LL_NFO, "PASS 2 CLEANUP COMPLETE");
+                LOG(LL_NFO, "Resetting dual-pass context to IDLE");
+                LOG(LL_DBG, "  KillPlaybackOrBake should have been called and executed normally");
+                LOG(LL_DBG, "  Recording instance should be freed (ms_recordingInstanceIndex = INDEX_NONE)");
+                LOG(LL_DBG, "  Ready for next export");
+                
+                dualPassContext->state = DualPassState::IDLE;
+                dualPassContext->audio_buffer.clear();
+                dualPassContext->audio_buffer.shrink_to_fit();
+                dualPassContext->saved_video_editor_interface = nullptr;
+                dualPassContext->saved_montage_ptr = nullptr;
+                
+                LOG(LL_NFO, "Dual-pass context reset complete");
+            }
+        }
+        
+        LOG(LL_NFO, "CleanupReplayPlaybackInternal exit");
+        POST();
+    }
+
+    bool IsPendingBakeStart_Hook() {
+        PRE();
+        
+        static uint32_t* g_bakeStatePtr = nullptr;
+        if (!g_bakeStatePtr && g_isPendingBakeStartAddress) {
+            const uint64_t ripAfterCmp = g_isPendingBakeStartAddress + 7;
+            const int32_t offset = 0x01DD1525; // This might change in the future?
+            g_bakeStatePtr = reinterpret_cast<uint32_t*>(ripAfterCmp + offset);
+            LOG(LL_DBG, "IsPendingBakeStart: Calculated state pointer: ", reinterpret_cast<void*>(g_bakeStatePtr));
+        }
+        
+        bool originalResult = false;
+        if (g_bakeStatePtr) {
+            originalResult = (*g_bakeStatePtr == 4);
+        }
+        
+        LOG(LL_TRC, "IsPendingBakeStart called, original result: ", originalResult);
+        
+        if (dualPassContext) {
+            if (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+                dualPassContext->state == DualPassState::PASS2_PENDING) {
+                LOG(LL_DBG, "IsPendingBakeStart: Overriding to TRUE for dual-pass transition");
+                LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
+                LOG(LL_DBG, "  Keeping loading screen visible until Pass 2 starts");
+                POST();
+                return true;
+            }
+        }
+        
+        // Normal behavior - return GTA's state
+        if (dualPassContext && originalResult) {
+            LOG(LL_TRC, "IsPendingBakeStart: Dual-pass state: ", static_cast<int>(dualPassContext->state));
+        }
+        
+        POST();
+        return originalResult;
+    }
+
+    void KillPlaybackOrBake_Hook(void* thisPtr, bool userCancelled) {
+        PRE();
+        LOG(LL_NFO, "KillPlaybackOrBake_Hook called");
+        LOG(LL_DBG, "  thisPtr: ", thisPtr);
+        LOG(LL_DBG, "  userCancelled: ", userCancelled);
+        LOG(LL_DBG, "  dualPassContext exists: ", (dualPassContext != nullptr));
+        if (dualPassContext) {
+            LOG(LL_DBG, "  Current dual-pass state: ", static_cast<int>(dualPassContext->state),
+                " (",
+                (dualPassContext->state == DualPassState::IDLE ? "IDLE" :
+                 dualPassContext->state == DualPassState::PASS1_RUNNING ? "PASS1_RUNNING" :
+                 dualPassContext->state == DualPassState::PASS1_COMPLETE ? "PASS1_COMPLETE" :
+                 dualPassContext->state == DualPassState::PASS2_PENDING ? "PASS2_PENDING" :
+                 dualPassContext->state == DualPassState::PASS2_RUNNING ? "PASS2_RUNNING" :
+                 dualPassContext->state == DualPassState::PASS2_COMPLETE ? "PASS2_COMPLETE" : "UNKNOWN"),
+                ")");
+        }
+        
+        if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE && !userCancelled) {
+            POST();
+            return;
+        }
+        
+        LOG(LL_NFO, "KillPlaybackOrBake (normal cleanup)");
+        if (dualPassContext) {
+            LOG(LL_DBG, "  Current state: ", static_cast<int>(dualPassContext->state),
+                " (",
+                (dualPassContext->state == DualPassState::IDLE ? "IDLE" :
+                 dualPassContext->state == DualPassState::PASS2_COMPLETE ? "PASS2_COMPLETE" :
+                 dualPassContext->state == DualPassState::PASS2_RUNNING ? "PASS2_RUNNING" : "OTHER"),
+                ")");
+        } else {
+            LOG(LL_DBG, "  No dual-pass context (normal single-pass mode)");
+        }
+        
+        try {
+            uint64_t killAddr = reinterpret_cast<uint64_t>(pKillPlaybackOrBakeOriginal);
+            
+            LOG(LL_DBG, "Temporarily restoring original bytes at 0x", std::hex, killAddr);
+            
+            DWORD oldProtect;
+            if (!VirtualProtect(reinterpret_cast<void*>(killAddr), 12, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                LOG(LL_ERR, "VirtualProtect failed (restore): ", GetLastError());
+                POST();
+                return;
+            }
+            
+            memcpy(reinterpret_cast<void*>(killAddr), g_killPlaybackOrBakeOriginalBytes, 12);
+            FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(killAddr), 12);
+            
+            LOG(LL_DBG, "Calling original KillPlaybackOrBake function...");
+            LOG(LL_DBG, "  Function address: 0x", std::hex, killAddr, std::dec);
+
+            reinterpret_cast<KillPlaybackOrBakeFunc>(killAddr)(thisPtr, userCancelled);
+            
+            LOG(LL_NFO, "Original KillPlaybackOrBake executed successfully");
+            LOG(LL_DBG, "  ms_recordingInstanceIndex should now be INDEX_NONE (-1)");
+            LOG(LL_DBG, "  Recording slot should be freed for next export");
+            
+            // Re-install the hook
+            LOG(LL_DBG, "Re-installing hook...");
+            installAbsoluteJumpHook(killAddr, 
+                reinterpret_cast<uintptr_t>(&KillPlaybackOrBake_Hook));
+            
+            VirtualProtect(reinterpret_cast<void*>(killAddr), 12, oldProtect, &oldProtect);
+            
+            LOG(LL_DBG, "Hook reinstalled successfully");
+        }
+        catch (const std::exception& e) {
+            LOG(LL_ERR, "Exception during unhook/rehook: ", e.what());
+            LOG(LL_ERR, "  This may leave the hook in an inconsistent state!");
+        }
+        catch (...) {
+            LOG(LL_ERR, "Unknown exception during unhook/rehook");
+            LOG(LL_ERR, "  This may leave the hook in an inconsistent state!");
+        }
+        
+        LOG(LL_NFO, "KillPlaybackOrBake_Hook exit");
+        POST();
     }
 
     void touchD3D11Import() {
@@ -710,9 +1091,11 @@ void ever::initialize() {
         uint64_t pGetRenderTimeBase = NULL;
         uint64_t pCreateTexture = NULL;
         uint64_t pCreateThread = NULL;
-        uint64_t pIsPendingPendingBakeStart = NULL;
         uint64_t pStartBakeProject = NULL;
         uint64_t pWatermarkRenderer = NULL;
+        uint64_t pCleanupReplayPlayback = NULL;
+        uint64_t pIsPendingBakeStart = NULL;
+        uint64_t pKillPlaybackOrBake = NULL;
         
         patternScanner->addPattern("get_render_time_base_function", 
                                     ever::hooking::patterns::getRenderTimeBase, 
@@ -723,29 +1106,31 @@ void ever::initialize() {
         patternScanner->addPattern("create_texture_function", 
                                     ever::hooking::patterns::createTexture, 
                                     &pCreateTexture);
-        patternScanner->addPattern("is_pending_pending_bake_start", 
-                                    ever::hooking::patterns::isPendingPendingBakeStart, 
-                                    &pIsPendingPendingBakeStart);
         patternScanner->addPattern("start_bake_project", 
                                     ever::hooking::patterns::startBakeProject, 
                                     &pStartBakeProject);
         patternScanner->addPattern("watermark_renderer_render", 
                                     ever::hooking::patterns::watermarkRendererRender, 
                                     &pWatermarkRenderer);
+        patternScanner->addPattern("cleanup_replay_playback_internal", 
+                                    ever::hooking::patterns::cleanupReplayPlayback, 
+                                    &pCleanupReplayPlayback);
+        patternScanner->addPattern("is_pending_bake_start", 
+                                    ever::hooking::patterns::isPendingBakeStart, 
+                                    &pIsPendingBakeStart);
+        patternScanner->addPattern("kill_playback_or_bake", 
+                                    ever::hooking::patterns::killPlaybackOrBake, 
+                                    &pKillPlaybackOrBake);
         patternScanner->performScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
         logResolvedHookTarget("CreateTexture", pCreateTexture);
         logResolvedHookTarget("CreateThread", pCreateThread);
-        logResolvedHookTarget("IsPendingPendingBakeStart", pIsPendingPendingBakeStart);
         logResolvedHookTarget("StartBakeProject", pStartBakeProject);
         logResolvedHookTarget("WatermarkRenderer", pWatermarkRenderer);
-        
-        // IsPendingPendingBakeStart is too small to hook, so we store it as a function pointer
-        if (pIsPendingPendingBakeStart) {
-            pIsPendingPendingBakeStartFunc = reinterpret_cast<IsPendingPendingBakeStartFunc>(pIsPendingPendingBakeStart);
-            LOG(LL_NFO, "IsPendingPendingBakeStart function pointer saved (calling directly, not hooking)");
-        }
+        logResolvedHookTarget("CleanupReplayPlaybackInternal", pCleanupReplayPlayback);
+        logResolvedHookTarget("IsPendingBakeStart", pIsPendingBakeStart);
+        logResolvedHookTarget("KillPlaybackOrBake", pKillPlaybackOrBake);
 
         try {
             if (pGetRenderTimeBase) {
@@ -786,6 +1171,65 @@ void ever::initialize() {
             } else {
                 LOG(LL_ERR, "Could not find the address for StartBakeProject function.");
                 LOG(LL_ERR, "Dual-pass audio rendering will NOT be available!");
+            }
+            
+            // Install manual hook for CleanupReplayPlaybackInternal
+            if (pCleanupReplayPlayback) {
+                pCleanupReplayPlaybackOriginal = reinterpret_cast<CleanupReplayPlaybackInternalFunc>(pCleanupReplayPlayback);
+                
+                // Store original bytes BEFORE installing hook
+                memcpy(g_cleanupOriginalBytes, reinterpret_cast<void*>(pCleanupReplayPlayback), 12);
+                LOG(LL_DBG, "Stored original bytes: ", 
+                    std::hex, std::setw(2), std::setfill('0'),
+                    static_cast<int>(g_cleanupOriginalBytes[0]), " ",
+                    static_cast<int>(g_cleanupOriginalBytes[1]), " ",
+                    static_cast<int>(g_cleanupOriginalBytes[2]), " ",
+                    static_cast<int>(g_cleanupOriginalBytes[3]));
+                
+                // Install hook (will overwrite with jump)
+                installAbsoluteJumpHook(pCleanupReplayPlayback, 
+                    reinterpret_cast<uintptr_t>(&CleanupReplayPlaybackInternal_Hook));
+                
+                LOG(LL_NFO, "CleanupReplayPlaybackInternal manual hook installed successfully");
+                LOG(LL_DBG, "  Original function: ", reinterpret_cast<void*>(pCleanupReplayPlayback));
+                LOG(LL_DBG, "  Can safely unhook/rehook using stored original bytes");
+            } else {
+                LOG(LL_WRN, "Could not find CleanupReplayPlaybackInternal function.");
+                LOG(LL_WRN, "Dual-pass rendering may experience 'no space left' errors!");
+            }
+            
+            if (pIsPendingBakeStart) {
+                g_isPendingBakeStartAddress = pIsPendingBakeStart; // Store for hook to access
+                const auto hookAddr = reinterpret_cast<uintptr_t>(&IsPendingBakeStart_Hook);
+                // Note: Function is 11 bytes but we patch 12 bytes - should be safe
+                if (installAbsoluteJumpHook(pIsPendingBakeStart, hookAddr)) {
+                    LOG(LL_NFO, "IsPendingBakeStart manual hook installed successfully");
+                    LOG(LL_DBG, "  Original function: ", reinterpret_cast<void*>(pIsPendingBakeStart));
+                    LOG(LL_DBG, "  Hook function: ", reinterpret_cast<void*>(hookAddr));
+                } else {
+                    LOG(LL_ERR, "Failed to install IsPendingBakeStart manual hook");
+                }
+            } else {
+                LOG(LL_WRN, "Could not find IsPendingBakeStart function.");
+            }
+            
+            if (pKillPlaybackOrBake) {
+                pKillPlaybackOrBakeOriginal = reinterpret_cast<KillPlaybackOrBakeFunc>(pKillPlaybackOrBake);
+                
+                // Store original bytes BEFORE installing hook
+                memcpy(g_killPlaybackOrBakeOriginalBytes, reinterpret_cast<void*>(pKillPlaybackOrBake), 12);
+                LOG(LL_DBG, "KillPlaybackOrBake: Stored original bytes");
+                
+                // Install hook (will overwrite with jump)
+                installAbsoluteJumpHook(pKillPlaybackOrBake, 
+                    reinterpret_cast<uintptr_t>(&KillPlaybackOrBake_Hook));
+                
+                LOG(LL_NFO, "KillPlaybackOrBake manual hook installed successfully");
+                LOG(LL_DBG, "  Original function: ", reinterpret_cast<void*>(pKillPlaybackOrBake));
+                LOG(LL_DBG, "  This preserves ms_recordingInstanceIndex after Pass 1");
+            } else {
+                LOG(LL_WRN, "Could not find KillPlaybackOrBake function.");
+                LOG(LL_WRN, "Dual-pass rendering may experience 'insufficient storage' errors on consecutive renders!");
             }
             
             if (Config::Manager::disable_watermark) {
@@ -1383,92 +1827,118 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
     PRE();
     
     // Check dual-pass state BEFORE acquiring lock or resetting anything
-    LOG(LL_NFO, "Finalize called - checking dual-pass state");
+    LOG(LL_NFO, "IMFSinkWriter::Finalize called");
     if (dualPassContext) {
-        LOG(LL_NFO, "  dualPassContext exists, state =", static_cast<int>(dualPassContext->state));
+        LOG(LL_NFO, "  Current state: ", static_cast<int>(dualPassContext->state),
+            " (",
+            (dualPassContext->state == DualPassState::IDLE ? "IDLE" :
+             dualPassContext->state == DualPassState::PASS1_RUNNING ? "PASS1_RUNNING" :
+             dualPassContext->state == DualPassState::PASS1_COMPLETE ? "PASS1_COMPLETE" :
+             dualPassContext->state == DualPassState::PASS2_PENDING ? "PASS2_PENDING" :
+             dualPassContext->state == DualPassState::PASS2_RUNNING ? "PASS2_RUNNING" :
+             dualPassContext->state == DualPassState::PASS2_COMPLETE ? "PASS2_COMPLETE" : "UNKNOWN"),
+            ")");
     } else {
-        LOG(LL_NFO, "  dualPassContext is NULL");
+        LOG(LL_NFO, "  dualPassContext exists: NO (normal single-pass mode)");
     }
     
     std::lock_guard<std::mutex> sessionLock(mxSession);
     try {
         if (encodingSession != NULL) {
-            // Check if this is Pass 1 completing - if so, trigger Pass 2
+            // Check if this is Pass 1 completing
             if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
-                LOG(LL_NFO, "PASS 1 COMPLETE - Audio capture finished");
+                LOG(LL_NFO, "PASS 1 COMPLETE - Audio Capture Finished");
                 LOG(LL_NFO, "  Total audio buffered: ", dualPassContext->audio_buffer.size(), " bytes");
-                LOG(LL_NFO, "  Audio duration: ~", 
-                    (dualPassContext->audio_buffer.size() / dualPassContext->audio_block_align / dualPassContext->audio_sample_rate), 
-                    " seconds");
                 
-                // Skip encoder finalization - FFmpeg context was never created for audio-only mode
-                LOG(LL_NFO, "Skipping FFmpeg finalization (audio-only mode)");
+                if (dualPassContext->audio_buffer.size() > 0) {
+                    double durationSeconds = static_cast<double>(dualPassContext->audio_buffer.size()) / 
+                                            dualPassContext->audio_block_align / 
+                                            dualPassContext->audio_sample_rate;
+                    LOG(LL_NFO, "  Audio duration: ~", durationSeconds, " seconds");
+                } else {
+                    LOG(LL_WRN, "  Warning: No audio was captured in Pass 1!");
+                }
                 
+                // Skip FFmpeg finalization - encoder was never created for Pass 1 (audio-only mode)
+                LOG(LL_NFO, "Skipping FFmpeg finalization (no encoder in Pass 1)");
+                
+                // Mark Pass 1 as complete
                 dualPassContext->state = DualPassState::PASS1_COMPLETE;
+                LOG(LL_NFO, "State changed to PASS1_COMPLETE");
                 
-                // Trigger Pass 2 in a separate thread to avoid blocking
-                std::thread([]{
-                    LOG(LL_NFO, "Waiting 2 seconds before triggering Pass 2...");
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    
-                    if (dualPassContext && 
-                        dualPassContext->saved_video_editor_interface && 
-                        dualPassContext->saved_montage_ptr && 
-                        GameHooks::StartBakeProject::OriginalFunc) {
-                        
-                        LOG(LL_NFO, "Triggering PASS 2 for video export...");
-                        dualPassContext->state = DualPassState::PASS2_RUNNING;
-                        LOG(LL_NFO, "  State changed to PASS2_RUNNING before triggering");
-                        
-                        bool result = GameHooks::StartBakeProject::OriginalFunc(
-                            dualPassContext->saved_video_editor_interface,
-                            dualPassContext->saved_montage_ptr
-                        );
-                        
-                        if (result) {
-                            LOG(LL_NFO, "Pass 2 triggered successfully");
-                        } else {
-                            LOG(LL_ERR, "Failed to trigger Pass 2!");
-                            dualPassContext->state = DualPassState::IDLE;
-                        }
-                    } else {
-                        LOG(LL_ERR, "Cannot trigger Pass 2 - missing pointers");
-                        if (dualPassContext) {
-                            LOG(LL_ERR, "  State:", static_cast<int>(dualPassContext->state));
-                            LOG(LL_ERR, "  videoEditorInterface:", dualPassContext->saved_video_editor_interface);
-                            LOG(LL_ERR, "  montage:", dualPassContext->saved_montage_ptr);
-                            LOG(LL_ERR, "  OriginalFunc:", reinterpret_cast<void*>(GameHooks::StartBakeProject::OriginalFunc));
-                            dualPassContext->state = DualPassState::IDLE;
-                        }
-                    }
-                }).detach();
-            }
-            else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
-                LOG(LL_NFO, "PASS 2 COMPLETE - Video export finished");
+                // Skip FFmpeg finalization (no encoder in Pass 1)
+                LOG(LL_NFO, "Skipping FFmpeg finalization (no encoder in Pass 1)");
+                
+                // Call original to trigger GTA's cleanup
+                LOG(LL_DBG, "Executing: OriginalFunc(pThis)...");
+                HRESULT result = OriginalFunc(pThis);
+                
+                LOG(LL_NFO, "Original Finalize returned: ", Logger::hex(result, 8));
+                LOG(LL_NFO, "Recording instance should be preserved for Pass 2");
+                LOG(LL_NFO, "Waiting for CleanupReplayPlaybackInternal to trigger Pass 2...");
+                
+                LOG_CALL(LL_DBG, encodingSession.reset());
+                LOG_CALL(LL_DBG, ::exportContext.reset());
+                LOG(LL_NFO, "IMFSinkWriter::Finalize exit (Pass 1)");
+                POST();
+                return result;
+                
+            } else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
+                // Pass 2 complete
+                LOG(LL_NFO, "PASS 2 COMPLETE - Video Export Finished");
                 
                 // Finalize FFmpeg encoder
+                LOG(LL_DBG, "Finalizing audio stream...");
                 LOG_CALL(LL_DBG, encodingSession->finishAudio());
+                
+                LOG(LL_DBG, "Finalizing video stream...");
                 LOG_CALL(LL_DBG, encodingSession->finishVideo());
+                
+                LOG(LL_DBG, "Ending encoding session...");
                 LOG_CALL(LL_DBG, encodingSession->endSession());
                 
-                // Mark as complete - muxing will happen after encoder closes files
+                // Mark as complete BEFORE calling original Finalize
+                LOG(LL_NFO, "DUAL-PASS RENDERING COMPLETE");
+                LOG(LL_NFO, "  Final output: ", dualPassContext->final_output_file);
+                LOG(LL_NFO, "Resetting dual-pass context");
+                dualPassContext->audio_buffer.clear();
+                dualPassContext->audio_buffer.shrink_to_fit();
+                dualPassContext->saved_video_editor_interface = nullptr;
+                dualPassContext->saved_montage_ptr = nullptr;
+                dualPassContext->timestamp.clear();
+                dualPassContext->final_output_file.clear();
+                
+                // Mark as complete and reset context
+                LOG(LL_NFO, "Changing state from PASS2_RUNNING to PASS2_COMPLETE");
                 dualPassContext->state = DualPassState::PASS2_COMPLETE;
-            }
-            else {
+                LOG(LL_NFO, "State changed: PASS2_COMPLETE");
+                LOG(LL_DBG, "  KillPlaybackOrBake hook to execute normally when GTA calls it");
+                
+                // Clean up our resources
+                LOG(LL_DBG, "Cleaning up EVER resources...");
+                LOG_CALL(LL_DBG, encodingSession.reset());
+                LOG_CALL(LL_DBG, ::exportContext.reset());
+                LOG(LL_DBG, "EVER resources cleaned up");
+                
+                LOG(LL_NFO, "IMFSinkWriter::Finalize exit (Pass 2)");
+                POST();
+                return S_OK;
+                
+            } else {
                 // Normal mode or other states - finalize encoder
-                LOG(LL_NFO, "Finalizing encoder (normal mode or non-Pass 1)");
+                if (dualPassContext) {
+                    LOG(LL_NFO, "Finalizing encoder (current state: ", static_cast<int>(dualPassContext->state), ")");
+                } else {
+                    LOG(LL_NFO, "Finalizing encoder (normal single-pass mode)");
+                }
+                
                 LOG_CALL(LL_DBG, encodingSession->finishAudio());
                 LOG_CALL(LL_DBG, encodingSession->finishVideo());
                 LOG_CALL(LL_DBG, encodingSession->endSession());
-                
-                if (dualPassContext) {
-                    LOG(LL_NFO, "Not triggering Pass 2 - state check failed");
-                    LOG(LL_NFO, "  Current state:", static_cast<int>(dualPassContext->state));
-                }
             }
         }
     } catch (std::exception& ex) {
-        LOG(LL_ERR, ex.what());
+        LOG(LL_ERR, "Exception in Finalize: ", ex.what());
         
         // Reset dual-pass context on error to prevent stale state
         if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
@@ -1484,36 +1954,11 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
     LOG_CALL(LL_DBG, encodingSession.reset());
     LOG_CALL(LL_DBG, ::exportContext.reset());
     
-    // Check if Pass 2 just completed - single file output
-    if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
-        LOG(LL_NFO, "DUAL-PASS RENDERING COMPLETE!");
-        LOG(LL_NFO, "  Final output: ", dualPassContext->final_output_file);
-        LOG(LL_NFO, "  Audio from Pass 1 buffer: ", dualPassContext->audio_buffer.size(), " bytes");
-        LOG(LL_NFO, "  Video from Pass 2: Encoded directly to file");
-        LOG(LL_NFO, "  No muxing required - single MP4 output from FFmpeg!");
-        
-        // Complete cleanup - reset ALL state for next render
-        LOG(LL_DBG, "Resetting dual-pass context for next render...");
-        dualPassContext->audio_buffer.clear();
-        dualPassContext->audio_buffer.shrink_to_fit();
-        dualPassContext->saved_video_editor_interface = nullptr;
-        dualPassContext->saved_montage_ptr = nullptr;
-        dualPassContext->original_fps = {0, 0};
-        dualPassContext->original_motion_blur_samples = 0;
-        dualPassContext->timestamp.clear();
-        dualPassContext->final_output_file.clear();
-        dualPassContext->audio_sample_rate = 48000;
-        dualPassContext->audio_channels = 2;
-        dualPassContext->audio_bits_per_sample = 16;
-        dualPassContext->audio_block_align = 4;
-        dualPassContext->audio_buffer_playback_position = 0;
-        dualPassContext->state = DualPassState::IDLE;
-        
-        LOG(LL_NFO, "Dual-pass context fully reset - ready for next render");
-    }
-    
+    LOG(LL_NFO, "=== IMFSinkWriter::Finalize exit ===");
     POST();
-    return S_OK;
+    
+    // Call original Finalize to let GTA clean up
+    return OriginalFunc(pThis);
 }
 
 void ever::finalize() {
@@ -1670,6 +2115,162 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     return result;
 }
 
+void GameHooks::CleanupReplayPlaybackInternal::Implementation() {
+    PRE();
+    
+    LOG(LL_NFO, "=== CleanupReplayPlaybackInternal called ===");
+    
+    if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
+        LOG(LL_NFO, "Intercepting cleanup after Pass 1 - preserving state for Pass 2");
+        LOG(LL_NFO, "  Audio buffer size: ", dualPassContext->audio_buffer.size(), " bytes");
+        LOG(LL_NFO, "  Audio duration: ~", 
+                   (dualPassContext->audio_buffer.size() / dualPassContext->audio_block_align / dualPassContext->audio_sample_rate), 
+                   " seconds");
+        
+        LOG(LL_DBG, "Skipping original CleanupReplayPlaybackInternal - preserving state");
+        
+        // Transition to PASS2_PENDING
+        dualPassContext->state = DualPassState::PASS2_PENDING;
+        LOG(LL_NFO, "State changed to PASS2_PENDING");
+        
+        // Spawn thread to trigger Pass 2 after short delay
+        std::thread([]{
+            LOG(LL_NFO, "=== Pass 2 Trigger Thread Started ===");
+            LOG(LL_NFO, "Waiting 1 second before triggering Pass 2...");
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            
+            if (!dualPassContext) {
+                LOG(LL_ERR, "dualPassContext was destroyed during wait!");
+                return;
+            }
+            
+            if (dualPassContext->state != DualPassState::PASS2_PENDING) {
+                LOG(LL_WRN, "State changed during wait - aborting Pass 2 trigger");
+                LOG(LL_WRN, "  Current state: ", static_cast<int>(dualPassContext->state));
+                return;
+            }
+            
+            if (!dualPassContext->saved_video_editor_interface) {
+                LOG(LL_ERR, "Missing saved videoEditorInterface pointer!");
+                dualPassContext->state = DualPassState::IDLE;
+                return;
+            }
+            
+            if (!dualPassContext->saved_montage_ptr) {
+                LOG(LL_ERR, "Missing saved montage pointer!");
+                dualPassContext->state = DualPassState::IDLE;
+                return;
+            }
+            
+            if (!GameHooks::StartBakeProject::OriginalFunc) {
+                LOG(LL_ERR, "StartBakeProject OriginalFunc is null!");
+                dualPassContext->state = DualPassState::IDLE;
+                return;
+            }
+            
+            LOG(LL_NFO, "Triggering Pass 2 (Video Export)");
+            LOG(LL_DBG, "  videoEditorInterface: ", dualPassContext->saved_video_editor_interface);
+            LOG(LL_DBG, "  montage: ", dualPassContext->saved_montage_ptr);
+            LOG(LL_DBG, "  Audio buffer ready: ", dualPassContext->audio_buffer.size(), " bytes");
+            
+            dualPassContext->state = DualPassState::PASS2_RUNNING;
+            LOG(LL_NFO, "State changed to PASS2_RUNNING");
+            
+            bool result = GameHooks::StartBakeProject::OriginalFunc(
+                dualPassContext->saved_video_editor_interface,
+                dualPassContext->saved_montage_ptr
+            );
+            
+            if (result) {
+                LOG(LL_NFO, "Pass 2 started successfully!");
+                LOG(LL_NFO, "  Will replay ", dualPassContext->audio_buffer.size(), 
+                           " bytes of buffered audio");
+            } else {
+                LOG(LL_ERR, "Failed to start Pass 2!");
+                LOG(LL_ERR, "  GTA V rejected the StartBakeProject call");
+                dualPassContext->state = DualPassState::IDLE;
+                
+                // Now do the full cleanup we skipped earlier
+                LOG(LL_NFO, "Performing delayed cleanup after Pass 2 failure");
+                if (GameHooks::CleanupReplayPlaybackInternal::OriginalFunc) {
+                    GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
+                }
+            }
+        }).detach();
+        
+    } else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
+        // Pass 2 completed
+        LOG(LL_NFO, "Pass 2 complete - performing full cleanup");
+        LOG(LL_DBG, "  Final output file: ", dualPassContext->final_output_file);
+        
+        GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
+        
+        // Reset dual-pass context for next render
+        LOG(LL_NFO, "Resetting dual-pass context");
+        dualPassContext->audio_buffer.clear();
+        dualPassContext->audio_buffer.shrink_to_fit();
+        dualPassContext->saved_video_editor_interface = nullptr;
+        dualPassContext->saved_montage_ptr = nullptr;
+        dualPassContext->timestamp.clear();
+        dualPassContext->final_output_file.clear();
+        dualPassContext->original_fps = {0, 0};
+        dualPassContext->original_motion_blur_samples = 0;
+        dualPassContext->audio_sample_rate = 48000;
+        dualPassContext->audio_channels = 2;
+        dualPassContext->audio_bits_per_sample = 16;
+        dualPassContext->audio_block_align = 4;
+        dualPassContext->audio_buffer_playback_position = 0;
+        dualPassContext->state = DualPassState::IDLE;
+        
+        LOG(LL_NFO, "Dual-pass rendering fully complete and cleaned up");
+        
+    } else {
+        LOG(LL_DBG, "Normal cleanup execution");
+        if (dualPassContext) {
+            LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
+        }
+        
+        GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
+        
+        // Reset dual-pass if it was somehow left in a bad state
+        if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+            LOG(LL_WRN, "Resetting stale dual-pass context during normal cleanup");
+            dualPassContext->state = DualPassState::IDLE;
+            dualPassContext->audio_buffer.clear();
+            dualPassContext->audio_buffer.shrink_to_fit();
+        }
+    }
+    
+    LOG(LL_NFO, "CleanupReplayPlaybackInternal exit");
+    POST();
+}
+
+bool GameHooks::IsPendingBakeStart::Implementation() {
+    PRE();
+    
+    bool originalResult = GameHooks::IsPendingBakeStart::OriginalFunc();
+    
+    LOG(LL_TRC, "IsPendingBakeStart called, original result: ", originalResult);
+    
+    // Override result during dual-pass transitions to keep loading screen visible
+    if (dualPassContext) {
+        if (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+            dualPassContext->state == DualPassState::PASS2_PENDING) {
+            LOG(LL_DBG, "IsPendingBakeStart: Overriding to TRUE for dual-pass transition");
+            LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
+            POST();
+            return true;
+        }
+    }
+    
+    // Normal behavior
+    if (dualPassContext && originalResult) {
+        LOG(LL_TRC, "IsPendingBakeStart: Dual-pass state: ", static_cast<int>(dualPassContext->state));
+    }
+    
+    POST();
+    return originalResult;
+}
 
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
     PRE();
