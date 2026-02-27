@@ -16,6 +16,8 @@ struct AVPacket;
 struct SwsContext;
 struct SwrContext;
 struct AVAudioFifo;
+struct AVFilterGraph;
+struct AVFilterContext;
 
 namespace Encoder {
     class FFmpegEncoder {
@@ -57,6 +59,16 @@ namespace Encoder {
         SwrContext* swrContext_ = nullptr;
         AVAudioFifo* audioFifo_ = nullptr;
 
+        AVFilterGraph* videoFilterGraph_ = nullptr;
+        AVFilterContext* videoBufferSrcCtx_ = nullptr;
+        AVFilterContext* videoBufferSinkCtx_ = nullptr;
+
+        AVFilterGraph* audioFilterGraph_ = nullptr;
+        AVFilterContext* audioBufferSrcCtx_ = nullptr;
+        AVFilterContext* audioBufferSinkCtx_ = nullptr;
+
+        int swsFlags_ = 2;
+
         AVFrame* videoFrame_ = nullptr;
         AVFrame* audioFrame_ = nullptr;
         AVPacket* packet_ = nullptr;
@@ -70,6 +82,8 @@ namespace Encoder {
 
         HRESULT InitializeVideoEncoder();
         HRESULT InitializeAudioEncoder();
+        HRESULT InitializeVideoFilterGraph(int inputPixFmt, int inputWidth, int inputHeight);
+        HRESULT InitializeAudioFilterGraph(int inputSampleFmt, int inputSampleRate, int inputNbChannels);
         HRESULT ParseEncoderOptions(const char* optionsString, AVCodecContext* codecContext);
         HRESULT EncodeVideoFrame(AVFrame* frame);
         HRESULT EncodeAudioFrame(AVFrame* frame);

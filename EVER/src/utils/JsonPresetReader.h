@@ -145,7 +145,12 @@ private:
         
         if (video.contains("crf")) {
             if (video["crf"].is_string()) {
-                options.push_back("crf=" + video["crf"].get<std::string>());
+                std::string crf_str = video["crf"].get<std::string>();
+                if (crf_str != "auto" && crf_str != "none") {
+                    options.push_back("crf=" + crf_str);
+                }
+            } else if (video["crf"].is_number_integer()) {
+                options.push_back("crf=" + std::to_string(video["crf"].get<int>()));
             } else if (video["crf"].is_number()) {
                 options.push_back("crf=" + std::to_string(video["crf"].get<double>()));
             }
@@ -170,25 +175,25 @@ private:
         if (video.contains("minrate") && video["minrate"] != "auto") {
             if (video["minrate"].is_string()) {
                 std::string mr = video["minrate"].get<std::string>();
-                if (!mr.empty() && mr.find('k') == std::string::npos && mr.find('M') == std::string::npos) {
-                    options.push_back("minrate=" + mr + "k");
+                if (!mr.empty() && mr.find_first_of("kKmM") == std::string::npos) {
+                    options.push_back("rc_min_rate=" + mr + "k");
                 } else {
-                    options.push_back("minrate=" + mr);
+                    options.push_back("rc_min_rate=" + mr);
                 }
             } else if (video["minrate"].is_number()) {
-                options.push_back("minrate=" + std::to_string(video["minrate"].get<int>()) + "k");
+                options.push_back("rc_min_rate=" + std::to_string(video["minrate"].get<int>()) + "k");
             }
         }
         if (video.contains("maxrate") && video["maxrate"] != "auto") {
             if (video["maxrate"].is_string()) {
                 std::string mr = video["maxrate"].get<std::string>();
-                if (!mr.empty() && mr.find('k') == std::string::npos && mr.find('M') == std::string::npos) {
-                    options.push_back("maxrate=" + mr + "k");
+                if (!mr.empty() && mr.find_first_of("kKmM") == std::string::npos) {
+                    options.push_back("rc_max_rate=" + mr + "k");
                 } else {
-                    options.push_back("maxrate=" + mr);
+                    options.push_back("rc_max_rate=" + mr);
                 }
             } else if (video["maxrate"].is_number()) {
-                options.push_back("maxrate=" + std::to_string(video["maxrate"].get<int>()) + "k");
+                options.push_back("rc_max_rate=" + std::to_string(video["maxrate"].get<int>()) + "k");
             }
         }
         
@@ -219,12 +224,12 @@ private:
             
             if (video["profile"].is_string()) {
                 profile_value = video["profile"].get<std::string>();
-                if (profile_value != "none" && profile_value != "auto" && profile_value != "0") {
+                if (profile_value != "none" && profile_value != "auto") {
                     should_add = true;
                 }
             } else if (video["profile"].is_number()) {
                 int prof_num = video["profile"].get<int>();
-                if (prof_num > 0) {
+                if (prof_num >= 0) {
                     profile_value = std::to_string(prof_num);
                     should_add = true;
                 }
@@ -320,6 +325,12 @@ private:
                 if (codec_opts.find('=') != std::string::npos) {
                     options.push_back(codec_opts);
                 }
+            }
+        }
+
+        if (video.contains("scaling") && video["scaling"] != "auto" && video["scaling"] != "none") {
+            if (video["scaling"].is_string()) {
+                options.push_back("_scaling=" + video["scaling"].get<std::string>());
             }
         }
         
@@ -521,28 +532,31 @@ private:
             }
         }
         
-        if (filter.contains("saturation") && filter["saturation"] != "0" && filter["saturation"] != "1") {
+        if (filter.contains("saturation")) {
             if (filter["saturation"].is_string()) {
-                std::string sat = filter["saturation"].get<std::string>();
-                eq_params.push_back("saturation=" + sat);
-            } else {
+                std::string sat_str = filter["saturation"].get<std::string>();
+                double val = std::stod(sat_str);
+                if (std::abs(val - 1.0) > 1e-6) {
+                    eq_params.push_back("saturation=" + sat_str);
+                }
+            } else if (filter["saturation"].is_number()) {
                 double val = filter["saturation"].get<double>();
-                if (val != 0.0 && val != 1.0) {
+                if (std::abs(val - 1.0) > 1e-6) {
                     eq_params.push_back("saturation=" + std::to_string(val));
-                } else if (val == 0.0) {
-                    // Treat 0 as neutral, don't add filter
-                } else {
-                    // val == 1.0, neutral, don't add
                 }
             }
         }
         
-        if (filter.contains("gamma") && filter["gamma"] != "0") {
+        if (filter.contains("gamma")) {
             if (filter["gamma"].is_string()) {
-                eq_params.push_back("gamma=" + filter["gamma"].get<std::string>());
-            } else {
+                std::string gamma_str = filter["gamma"].get<std::string>();
+                double val = std::stod(gamma_str);
+                if (std::abs(val - 1.0) > 1e-6) {
+                    eq_params.push_back("gamma=" + gamma_str);
+                }
+            } else if (filter["gamma"].is_number()) {
                 double val = filter["gamma"].get<double>();
-                if (val != 0.0) {
+                if (std::abs(val - 1.0) > 1e-6) {
                     eq_params.push_back("gamma=" + std::to_string(val));
                 }
             }
@@ -567,44 +581,45 @@ private:
     }
     
     static std::string buildAudioFiltersString(const nlohmann::json& root) {
-        if (!root.contains("filter")) {
-            return "";
-        }
-        
-        auto& filter = root["filter"];
         std::vector<std::string> filters;
-        
-        if (filter.contains("volume") && filter["volume"] != "100") {
-            if (filter["volume"].is_string()) {
-                std::string vol = filter["volume"].get<std::string>();
-                int vol_int = std::stoi(vol);
-                if (vol_int != 100) {
-                    double vol_factor = vol_int / 100.0;
-                    filters.push_back("volume=" + std::to_string(vol_factor));
-                }
-            } else {
-                int vol_int = filter["volume"].get<int>();
-                if (vol_int != 100) {
-                    double vol_factor = vol_int / 100.0;
-                    filters.push_back("volume=" + std::to_string(vol_factor));
+
+        if (root.contains("audio")) {
+            auto& audio = root["audio"];
+            if (audio.contains("volume") && audio["volume"] != "100") {
+                if (audio["volume"].is_string()) {
+                    std::string vol = audio["volume"].get<std::string>();
+                    int vol_int = std::stoi(vol);
+                    if (vol_int != 100) {
+                        double vol_factor = vol_int / 100.0;
+                        filters.push_back("volume=" + std::to_string(vol_factor));
+                    }
+                } else if (audio["volume"].is_number()) {
+                    int vol_int = audio["volume"].get<int>();
+                    if (vol_int != 100) {
+                        double vol_factor = vol_int / 100.0;
+                        filters.push_back("volume=" + std::to_string(vol_factor));
+                    }
                 }
             }
         }
-        
-        if (filter.contains("acontrast") && filter["acontrast"] != "33") {
-            if (filter["acontrast"].is_string()) {
-                filters.push_back("acontrast=" + filter["acontrast"].get<std::string>());
-            } else {
-                filters.push_back("acontrast=" + std::to_string(filter["acontrast"].get<int>()));
+
+        if (root.contains("filter")) {
+            auto& filter = root["filter"];
+            if (filter.contains("acontrast") && filter["acontrast"] != "33") {
+                if (filter["acontrast"].is_string()) {
+                    filters.push_back("acontrast=" + filter["acontrast"].get<std::string>());
+                } else {
+                    filters.push_back("acontrast=" + std::to_string(filter["acontrast"].get<int>()));
+                }
             }
         }
-        
+
         std::ostringstream oss;
         for (size_t i = 0; i < filters.size(); ++i) {
             if (i > 0) oss << ",";
             oss << filters[i];
         }
-        
+
         return oss.str();
     }
     

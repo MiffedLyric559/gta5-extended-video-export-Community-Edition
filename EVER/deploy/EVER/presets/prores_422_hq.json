@@ -8,7 +8,7 @@
     "codec": "prores_ks",
     "preset": "none",
     "pass": "1",
-    "crf": 0,
+    "crf": "none",
     "bitrate": "auto",
     "minrate": "auto",
     "maxrate": "auto",
@@ -45,8 +45,8 @@
     "deinterlace": "none",
     "brightness": "0",
     "contrast": "1",
-    "saturation": "0",
-    "gamma": "0",
+    "saturation": "1",
+    "gamma": "1",
     "acontrast": "33"
   }
 }

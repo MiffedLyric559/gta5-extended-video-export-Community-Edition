@@ -19,6 +19,9 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 }
 
 #pragma warning(pop)
@@ -28,6 +31,8 @@ namespace Encoder {
     FFmpegEncoder::FFmpegEncoder() {
         PRE();
         LOG(LL_NFO, "FFmpegEncoder: Constructor called");
+        
+        swsFlags_ = SWS_BILINEAR;
         
         static bool ffmpegInitialized = false;
         if (!ffmpegInitialized) {
@@ -154,13 +159,15 @@ namespace Encoder {
             LOG(LL_DBG, "FFmpegEncoder::Open - Output file opened successfully");
         }
         
+        AVDictionary* muxerOpts = nullptr;
         if (config_.format.faststart && std::string(config_.format.container) == "mp4") {
             LOG(LL_DBG, "FFmpegEncoder::Open - Setting faststart option for MP4");
-            av_dict_set(&formatContext_->metadata, "movflags", "faststart", 0);
+            av_dict_set(&muxerOpts, "movflags", "faststart", 0);
         }
         
         LOG(LL_DBG, "FFmpegEncoder::Open - Writing file header");
-        ret = avformat_write_header(formatContext_, nullptr);
+        ret = avformat_write_header(formatContext_, &muxerOpts);
+        av_dict_free(&muxerOpts);
         if (ret < 0) {
             LOG(LL_ERR, "FFmpegEncoder::Open - Failed to write file header, error code: ", ret);
             Cleanup();
@@ -482,6 +489,328 @@ namespace Encoder {
         return S_OK;
     }
 
+    HRESULT FFmpegEncoder::InitializeVideoFilterGraph(int inputPixFmtInt, int inputWidth, int inputHeight) {
+        PRE();
+        LOG(LL_DBG, "FFmpegEncoder::InitializeVideoFilterGraph - Initializing video filter graph");
+
+        AVPixelFormat inputPixFmt = static_cast<AVPixelFormat>(inputPixFmtInt);
+
+        const AVFilter* buffersrc  = avfilter_get_by_name("buffer");
+        const AVFilter* buffersink = avfilter_get_by_name("buffersink");
+
+        if (!buffersrc || !buffersink) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to find buffer/buffersink filters");
+            POST();
+            return E_FAIL;
+        }
+
+        videoFilterGraph_ = avfilter_graph_alloc();
+        if (!videoFilterGraph_) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to allocate filter graph");
+            POST();
+            return E_FAIL;
+        }
+
+        char args[512];
+        snprintf(args, sizeof(args),
+            "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1",
+            inputWidth, inputHeight, static_cast<int>(inputPixFmt),
+            videoCodecContext_->time_base.num,
+            videoCodecContext_->time_base.den);
+
+        int ret = avfilter_graph_create_filter(&videoBufferSrcCtx_, buffersrc, "in",
+            args, nullptr, videoFilterGraph_);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to create buffer source: ", errbuf);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = avfilter_graph_create_filter(&videoBufferSinkCtx_, buffersink, "out",
+            nullptr, nullptr, videoFilterGraph_);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to create buffer sink: ", errbuf);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        AVPixelFormat pix_fmts[] = { videoCodecContext_->pix_fmt, AV_PIX_FMT_NONE };
+        ret = av_opt_set_int_list(videoBufferSinkCtx_, "pix_fmts", pix_fmts,
+            AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to set sink pixel formats: ", errbuf);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        AVFilterInOut* outputs = avfilter_inout_alloc();
+        AVFilterInOut* inputs  = avfilter_inout_alloc();
+        if (!outputs || !inputs) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to allocate filter inout");
+            avfilter_inout_free(&outputs);
+            avfilter_inout_free(&inputs);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        outputs->name       = av_strdup("in");
+        outputs->filter_ctx = videoBufferSrcCtx_;
+        outputs->pad_idx    = 0;
+        outputs->next       = nullptr;
+
+        inputs->name        = av_strdup("out");
+        inputs->filter_ctx  = videoBufferSinkCtx_;
+        inputs->pad_idx     = 0;
+        inputs->next        = nullptr;
+
+        ret = avfilter_graph_parse_ptr(videoFilterGraph_, config_.video.filters,
+            &inputs, &outputs, nullptr);
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to parse filter graph: ", errbuf);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = avfilter_graph_config(videoFilterGraph_, nullptr);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Failed to configure filter graph: ", errbuf);
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        int sinkW = av_buffersink_get_w(videoBufferSinkCtx_);
+        int sinkH = av_buffersink_get_h(videoBufferSinkCtx_);
+
+        if (sinkW != videoCodecContext_->width || sinkH != videoCodecContext_->height) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeVideoFilterGraph - Filter graph output dimensions ",
+                sinkW, "x", sinkH, " do not match codec dimensions ",
+                videoCodecContext_->width, "x", videoCodecContext_->height,
+                " - falling back to SWS path");
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        LOG(LL_NFO, "FFmpegEncoder::InitializeVideoFilterGraph - Video filter graph initialized successfully");
+        POST();
+        return S_OK;
+    }
+
+    HRESULT FFmpegEncoder::InitializeAudioFilterGraph(int inputSampleFmtInt, int inputSampleRate, int inputNbChannels) {
+        PRE();
+        LOG(LL_DBG, "FFmpegEncoder::InitializeAudioFilterGraph - Initializing audio filter graph");
+
+        AVSampleFormat inputSampleFmt = static_cast<AVSampleFormat>(inputSampleFmtInt);
+
+        const AVFilter* abuffersrc  = avfilter_get_by_name("abuffer");
+        const AVFilter* abuffersink = avfilter_get_by_name("abuffersink");
+
+        if (!abuffersrc || !abuffersink) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to find abuffer/abuffersink filters");
+            POST();
+            return E_FAIL;
+        }
+
+        audioFilterGraph_ = avfilter_graph_alloc();
+        if (!audioFilterGraph_) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to allocate audio filter graph");
+            POST();
+            return E_FAIL;
+        }
+
+        char args[512];
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+        char ch_layout_str[64];
+        AVChannelLayout inputLayout = {};
+        av_channel_layout_default(&inputLayout, inputNbChannels);
+        av_channel_layout_describe(&inputLayout, ch_layout_str, sizeof(ch_layout_str));
+        av_channel_layout_uninit(&inputLayout);
+        snprintf(args, sizeof(args),
+            "time_base=1/%d:sample_rate=%d:sample_fmt=%s:channels=%d:channel_layout=%s",
+            inputSampleRate, inputSampleRate,
+            av_get_sample_fmt_name(inputSampleFmt),
+            inputNbChannels,
+            ch_layout_str);
+#else
+        uint64_t inChLayout = av_get_default_channel_layout(inputNbChannels);
+        snprintf(args, sizeof(args),
+            "time_base=1/%d:sample_rate=%d:sample_fmt=%s:channel_layout=0x%" PRIx64,
+            inputSampleRate, inputSampleRate,
+            av_get_sample_fmt_name(inputSampleFmt),
+            inChLayout);
+#endif
+
+        int ret = avfilter_graph_create_filter(&audioBufferSrcCtx_, abuffersrc, "in",
+            args, nullptr, audioFilterGraph_);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to create abuffer source: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = avfilter_graph_create_filter(&audioBufferSinkCtx_, abuffersink, "out",
+            nullptr, nullptr, audioFilterGraph_);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to create abuffer sink: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        AVSampleFormat out_sample_fmts[] = { audioCodecContext_->sample_fmt, AV_SAMPLE_FMT_NONE };
+        int out_sample_rates[] = { audioCodecContext_->sample_rate, -1 };
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+        int out_channel_counts[] = { audioCodecContext_->ch_layout.nb_channels, -1 };
+#else
+        int out_channel_counts[] = { audioCodecContext_->channels, -1 };
+#endif
+
+        ret = av_opt_set_int_list(audioBufferSinkCtx_, "sample_fmts", out_sample_fmts,
+            AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to set sink sample formats: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = av_opt_set_int_list(audioBufferSinkCtx_, "sample_rates", out_sample_rates,
+            -1, AV_OPT_SEARCH_CHILDREN);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to set sink sample rates: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = av_opt_set_int_list(audioBufferSinkCtx_, "channel_counts", out_channel_counts,
+            -1, AV_OPT_SEARCH_CHILDREN);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to set sink channel counts: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        AVFilterInOut* outputs = avfilter_inout_alloc();
+        AVFilterInOut* inputs  = avfilter_inout_alloc();
+        if (!outputs || !inputs) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to allocate filter inout");
+            avfilter_inout_free(&outputs);
+            avfilter_inout_free(&inputs);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        outputs->name       = av_strdup("in");
+        outputs->filter_ctx = audioBufferSrcCtx_;
+        outputs->pad_idx    = 0;
+        outputs->next       = nullptr;
+
+        inputs->name        = av_strdup("out");
+        inputs->filter_ctx  = audioBufferSinkCtx_;
+        inputs->pad_idx     = 0;
+        inputs->next        = nullptr;
+
+        ret = avfilter_graph_parse_ptr(audioFilterGraph_, config_.audio.filters,
+            &inputs, &outputs, nullptr);
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to parse audio filter graph: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        ret = avfilter_graph_config(audioFilterGraph_, nullptr);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioFilterGraph - Failed to configure audio filter graph: ", errbuf);
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            POST();
+            return E_FAIL;
+        }
+
+        LOG(LL_NFO, "FFmpegEncoder::InitializeAudioFilterGraph - Audio filter graph initialized successfully");
+        POST();
+        return S_OK;
+    }
+
     HRESULT FFmpegEncoder::ParseEncoderOptions(const char* optionsString, AVCodecContext* codecContext) {
         PRE();
         LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Parsing options: ", optionsString);
@@ -534,6 +863,29 @@ namespace Encoder {
                     optionCount++;
                 } else {
                     LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Unknown sample format: ", value);
+                }
+            } else if (key == "_scaling") {
+                static const std::map<std::string, int> swsAlgoMap = {
+                    {"fast_bilinear", SWS_FAST_BILINEAR},
+                    {"bilinear",      SWS_BILINEAR},
+                    {"bicubic",       SWS_BICUBIC},
+                    {"x",             SWS_X},
+                    {"point",         SWS_POINT},
+                    {"neighbor",      SWS_POINT},
+                    {"area",          SWS_AREA},
+                    {"bicublin",      SWS_BICUBLIN},
+                    {"gauss",         SWS_GAUSS},
+                    {"sinc",          SWS_SINC},
+                    {"lanczos",       SWS_LANCZOS},
+                    {"spline",        SWS_SPLINE},
+                };
+                auto algoIt = swsAlgoMap.find(value);
+                if (algoIt != swsAlgoMap.end()) {
+                    swsFlags_ = algoIt->second;
+                    LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Set SWS scaling flags: ", value);
+                    optionCount++;
+                } else {
+                    LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Unknown scaling algorithm: ", value, ", using bilinear");
                 }
             } else {
                 int ret = av_opt_set(codecContext->priv_data, key.c_str(), value.c_str(), 0);
@@ -623,79 +975,138 @@ namespace Encoder {
             inputFrame->linesize[i] = frame.rowsize[i];
         }
 
-        AVFrame* frameToEncode = inputFrame;
-        AVFrame* convertedFrame = nullptr;
-        
-        if (inputPixelFormat != videoCodecContext_->pix_fmt) {
-            LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Pixel format conversion required");
-            
-            if (!swsContext_) {
-                LOG(LL_DBG, "FFmpegEncoder::SendVideoFrame - Creating SWS context for pixel format conversion");
-                swsContext_ = sws_getContext(
-                    frame.width, frame.height, inputPixelFormat,
-                    videoCodecContext_->width, videoCodecContext_->height, videoCodecContext_->pix_fmt,
-                    SWS_BILINEAR, nullptr, nullptr, nullptr);
-                
-                if (!swsContext_) {
-                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to create SWS context");
+        if (strlen(config_.video.filters) > 0 && !videoFilterGraph_) {
+            LOG(LL_DBG, "FFmpegEncoder::SendVideoFrame - Initializing video filter graph");
+            HRESULT fghr = InitializeVideoFilterGraph(static_cast<int>(inputPixelFormat), frame.width, frame.height);
+            if (FAILED(fghr)) {
+                LOG(LL_WRN, "FFmpegEncoder::SendVideoFrame - Video filter graph init failed, falling back to SWS path");
+            }
+        }
+
+        if (videoFilterGraph_) {
+            LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Using filter graph path");
+
+            int ret = av_buffersrc_add_frame_flags(videoBufferSrcCtx_, inputFrame, AV_BUFFERSRC_FLAG_KEEP_REF);
+            if (ret < 0) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to push frame into filter graph: ", errbuf);
+                av_frame_free(&inputFrame);
+                POST();
+                return E_FAIL;
+            }
+
+            while (true) {
+                AVFrame* filteredFrame = av_frame_alloc();
+                if (!filteredFrame) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to allocate filtered frame");
                     av_frame_free(&inputFrame);
                     POST();
                     return E_FAIL;
                 }
+
+                ret = av_buffersink_get_frame(videoBufferSinkCtx_, filteredFrame);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    av_frame_free(&filteredFrame);
+                    break;
+                }
+                if (ret < 0) {
+                    char errbuf[256];
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to get frame from filter graph: ", errbuf);
+                    av_frame_free(&filteredFrame);
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                HRESULT hr = EncodeVideoFrame(filteredFrame);
+                av_frame_free(&filteredFrame);
+
+                if (FAILED(hr)) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to encode filtered frame");
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return hr;
+                }
             }
-            
-            convertedFrame = av_frame_alloc();
-            if (!convertedFrame) {
-                LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to allocate converted frame");
-                av_frame_free(&inputFrame);
-                POST();
-                return E_FAIL;
+
+            av_frame_free(&inputFrame);
+        } else {
+            AVFrame* frameToEncode = inputFrame;
+            AVFrame* convertedFrame = nullptr;
+
+            if (inputPixelFormat != videoCodecContext_->pix_fmt) {
+                LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Pixel format conversion required");
+
+                if (!swsContext_) {
+                    LOG(LL_DBG, "FFmpegEncoder::SendVideoFrame - Creating SWS context for pixel format conversion");
+                    swsContext_ = sws_getContext(
+                        frame.width, frame.height, inputPixelFormat,
+                        videoCodecContext_->width, videoCodecContext_->height, videoCodecContext_->pix_fmt,
+                        swsFlags_, nullptr, nullptr, nullptr);
+
+                    if (!swsContext_) {
+                        LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to create SWS context");
+                        av_frame_free(&inputFrame);
+                        POST();
+                        return E_FAIL;
+                    }
+                }
+
+                convertedFrame = av_frame_alloc();
+                if (!convertedFrame) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to allocate converted frame");
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                convertedFrame->width = videoCodecContext_->width;
+                convertedFrame->height = videoCodecContext_->height;
+                convertedFrame->format = videoCodecContext_->pix_fmt;
+                convertedFrame->pts = inputFrame->pts;
+
+                int ret = av_frame_get_buffer(convertedFrame, 0);
+                if (ret < 0) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to allocate converted frame buffer, error code: ", ret);
+                    av_frame_free(&inputFrame);
+                    av_frame_free(&convertedFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                ret = sws_scale(swsContext_, inputFrame->data, inputFrame->linesize, 0, frame.height,
+                               convertedFrame->data, convertedFrame->linesize);
+
+                if (ret < 0) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Pixel format conversion failed, error code: ", ret);
+                    av_frame_free(&inputFrame);
+                    av_frame_free(&convertedFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Pixel format conversion completed");
+                frameToEncode = convertedFrame;
             }
-            
-            convertedFrame->width = videoCodecContext_->width;
-            convertedFrame->height = videoCodecContext_->height;
-            convertedFrame->format = videoCodecContext_->pix_fmt;
-            convertedFrame->pts = inputFrame->pts;
-            
-            int ret = av_frame_get_buffer(convertedFrame, 0);
-            if (ret < 0) {
-                LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to allocate converted frame buffer, error code: ", ret);
-                av_frame_free(&inputFrame);
+
+            HRESULT hr = EncodeVideoFrame(frameToEncode);
+
+            av_frame_free(&inputFrame);
+            if (convertedFrame) {
                 av_frame_free(&convertedFrame);
-                POST();
-                return E_FAIL;
             }
-            
-            ret = sws_scale(swsContext_, inputFrame->data, inputFrame->linesize, 0, frame.height,
-                           convertedFrame->data, convertedFrame->linesize);
-            
-            if (ret < 0) {
-                LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Pixel format conversion failed, error code: ", ret);
-                av_frame_free(&inputFrame);
-                av_frame_free(&convertedFrame);
+
+            if (FAILED(hr)) {
+                LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to encode video frame");
                 POST();
-                return E_FAIL;
+                return hr;
             }
-            
-            LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Pixel format conversion completed");
-            frameToEncode = convertedFrame;
         }
-        
-        HRESULT hr = EncodeVideoFrame(frameToEncode);
-        
-        av_frame_free(&inputFrame);
-        if (convertedFrame) {
-            av_frame_free(&convertedFrame);
-        }
-        
-        if (FAILED(hr)) {
-            LOG(LL_ERR, "FFmpegEncoder::SendVideoFrame - Failed to encode video frame");
-            POST();
-            return hr;
-        }
-        
+
         LOG(LL_TRC, "FFmpegEncoder::SendVideoFrame - Frame encoded successfully");
-        
+
         POST();
         return S_OK;
     }
@@ -798,107 +1209,174 @@ namespace Encoder {
         
         AVFrame* frameToEncode = inputFrame;
         AVFrame* convertedFrame = nullptr;
-        
+
         bool needsConversion = (inputSampleFormat != audioCodecContext_->sample_fmt);
-        
-        if (needsConversion) {
-            LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion required");
-            
-            if (!swrContext_) {
-                LOG(LL_DBG, "FFmpegEncoder::SendAudioSampleChunk - Creating SWR context for sample format conversion");
-                
-#if LIBAVUTIL_VERSION_MAJOR >= 57
-                int ret = swr_alloc_set_opts2(&swrContext_,
-                    &audioCodecContext_->ch_layout, audioCodecContext_->sample_fmt, audioCodecContext_->sample_rate,
-                    &inputFrame->ch_layout, inputSampleFormat, chunk.sampleRate,
-                    0, nullptr);
-#else
-                swrContext_ = swr_alloc_set_opts(nullptr,
-                    audioCodecContext_->channel_layout, audioCodecContext_->sample_fmt, audioCodecContext_->sample_rate,
-                    inputFrame->channel_layout, inputSampleFormat, chunk.sampleRate,
-                    0, nullptr);
-                int ret = swrContext_ ? 0 : -1;
-#endif
-                
-                if (ret < 0 || !swrContext_) {
-                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate SWR context");
-                    av_frame_free(&inputFrame);
-                    POST();
-                    return E_FAIL;
+        int producedSamples = 0;
+
+        if (strlen(config_.audio.filters) > 0 && !audioFilterGraph_) {
+            LOG(LL_DBG, "FFmpegEncoder::SendAudioSampleChunk - Initializing audio filter graph");
+            HRESULT fghr = InitializeAudioFilterGraph(
+                static_cast<int>(inputSampleFormat),
+                chunk.sampleRate,
+                channels);
+            if (FAILED(fghr)) {
+                LOG(LL_WRN, "FFmpegEncoder::SendAudioSampleChunk - Audio filter graph init failed, falling back to SWR path");
+            }
+        }
+
+        if (audioFilterGraph_) {
+            LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Using audio filter graph path");
+
+            int ret = av_buffersrc_add_frame_flags(audioBufferSrcCtx_, inputFrame, AV_BUFFERSRC_FLAG_KEEP_REF);
+            if (ret < 0) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to push frame into audio filter graph: ", errbuf);
+                av_frame_free(&inputFrame);
+                POST();
+                return E_FAIL;
+            }
+
+            AVFrame* filteredFrame = av_frame_alloc();
+            while (filteredFrame) {
+                ret = av_buffersink_get_frame(audioBufferSinkCtx_, filteredFrame);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                    break;
                 }
-                
-                ret = swr_init(swrContext_);
                 if (ret < 0) {
-                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to initialize SWR context, error code: ", ret);
+                    char errbuf[256];
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to get frame from audio filter graph: ", errbuf);
+                    av_frame_free(&filteredFrame);
                     av_frame_free(&inputFrame);
                     POST();
                     return E_FAIL;
                 }
+
+                int fgSamples = filteredFrame->nb_samples;
+                producedSamples += fgSamples;
+
+                int fifoRealloc = av_audio_fifo_realloc(audioFifo_, av_audio_fifo_size(audioFifo_) + fgSamples);
+                if (fifoRealloc < 0) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to realloc audio FIFO (filter path), error code: ", fifoRealloc);
+                    av_frame_free(&filteredFrame);
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                int fifoWrite = av_audio_fifo_write(audioFifo_, (void**)filteredFrame->data, fgSamples);
+                if (fifoWrite < fgSamples) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to write filtered samples to FIFO, wrote: ", fifoWrite);
+                    av_frame_free(&filteredFrame);
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                av_frame_unref(filteredFrame);
             }
-            
-            convertedFrame = av_frame_alloc();
-            if (!convertedFrame) {
-                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate converted frame");
-                av_frame_free(&inputFrame);
-                POST();
-                return E_FAIL;
-            }
-            
-            convertedFrame->nb_samples = chunk.samples;
-            convertedFrame->sample_rate = audioCodecContext_->sample_rate;
-            convertedFrame->format = audioCodecContext_->sample_fmt;
-            convertedFrame->pts = inputFrame->pts;
-            
+            av_frame_free(&filteredFrame);
+        } else {
+            if (needsConversion) {
+                LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion required");
+
+                if (!swrContext_) {
+                    LOG(LL_DBG, "FFmpegEncoder::SendAudioSampleChunk - Creating SWR context for sample format conversion");
+
 #if LIBAVUTIL_VERSION_MAJOR >= 57
-            av_channel_layout_copy(&convertedFrame->ch_layout, &audioCodecContext_->ch_layout);
+                    int ret = swr_alloc_set_opts2(&swrContext_,
+                        &audioCodecContext_->ch_layout, audioCodecContext_->sample_fmt, audioCodecContext_->sample_rate,
+                        &inputFrame->ch_layout, inputSampleFormat, chunk.sampleRate,
+                        0, nullptr);
 #else
-            convertedFrame->channel_layout = audioCodecContext_->channel_layout;
-            convertedFrame->channels = audioCodecContext_->channels;
+                    swrContext_ = swr_alloc_set_opts(nullptr,
+                        audioCodecContext_->channel_layout, audioCodecContext_->sample_fmt, audioCodecContext_->sample_rate,
+                        inputFrame->channel_layout, inputSampleFormat, chunk.sampleRate,
+                        0, nullptr);
+                    int ret = swrContext_ ? 0 : -1;
 #endif
-            
-            int ret = av_frame_get_buffer(convertedFrame, 0);
-            if (ret < 0) {
-                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate converted frame buffer, error code: ", ret);
+
+                    if (ret < 0 || !swrContext_) {
+                        LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate SWR context");
+                        av_frame_free(&inputFrame);
+                        POST();
+                        return E_FAIL;
+                    }
+
+                    ret = swr_init(swrContext_);
+                    if (ret < 0) {
+                        LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to initialize SWR context, error code: ", ret);
+                        av_frame_free(&inputFrame);
+                        POST();
+                        return E_FAIL;
+                    }
+                }
+
+                convertedFrame = av_frame_alloc();
+                if (!convertedFrame) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate converted frame");
+                    av_frame_free(&inputFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                convertedFrame->nb_samples = chunk.samples;
+                convertedFrame->sample_rate = audioCodecContext_->sample_rate;
+                convertedFrame->format = audioCodecContext_->sample_fmt;
+                convertedFrame->pts = inputFrame->pts;
+
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+                av_channel_layout_copy(&convertedFrame->ch_layout, &audioCodecContext_->ch_layout);
+#else
+                convertedFrame->channel_layout = audioCodecContext_->channel_layout;
+                convertedFrame->channels = audioCodecContext_->channels;
+#endif
+
+                int ret = av_frame_get_buffer(convertedFrame, 0);
+                if (ret < 0) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to allocate converted frame buffer, error code: ", ret);
+                    av_frame_free(&inputFrame);
+                    av_frame_free(&convertedFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                ret = swr_convert(swrContext_, convertedFrame->data, chunk.samples,
+                                 (const uint8_t**)inputFrame->data, chunk.samples);
+
+                if (ret < 0) {
+                    LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion failed, error code: ", ret);
+                    av_frame_free(&inputFrame);
+                    av_frame_free(&convertedFrame);
+                    POST();
+                    return E_FAIL;
+                }
+
+                LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion completed, converted samples: ", ret);
+                convertedFrame->nb_samples = ret;
+                frameToEncode = convertedFrame;
+            }
+
+            producedSamples = frameToEncode->nb_samples;
+
+            int fifoRealloc = av_audio_fifo_realloc(audioFifo_, av_audio_fifo_size(audioFifo_) + producedSamples);
+            if (fifoRealloc < 0) {
+                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to realloc audio FIFO, error code: ", fifoRealloc);
                 av_frame_free(&inputFrame);
-                av_frame_free(&convertedFrame);
+                if (convertedFrame) av_frame_free(&convertedFrame);
                 POST();
                 return E_FAIL;
             }
-            
-            ret = swr_convert(swrContext_, convertedFrame->data, chunk.samples,
-                             (const uint8_t**)inputFrame->data, chunk.samples);
-            
-            if (ret < 0) {
-                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion failed, error code: ", ret);
+
+            int fifoWrite = av_audio_fifo_write(audioFifo_, (void**)frameToEncode->data, producedSamples);
+            if (fifoWrite < producedSamples) {
+                LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to write samples into FIFO, wrote: ", fifoWrite);
                 av_frame_free(&inputFrame);
-                av_frame_free(&convertedFrame);
+                if (convertedFrame) av_frame_free(&convertedFrame);
                 POST();
                 return E_FAIL;
             }
-            
-            LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Sample format conversion completed, converted samples: ", ret);
-            convertedFrame->nb_samples = ret;
-            frameToEncode = convertedFrame;
-        }
-        
-        int producedSamples = frameToEncode->nb_samples;
-
-        int fifoRealloc = av_audio_fifo_realloc(audioFifo_, av_audio_fifo_size(audioFifo_) + producedSamples);
-        if (fifoRealloc < 0) {
-            LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to realloc audio FIFO, error code: ", fifoRealloc);
-            av_frame_free(&inputFrame);
-            if (convertedFrame) av_frame_free(&convertedFrame);
-            POST();
-            return E_FAIL;
-        }
-
-        int fifoWrite = av_audio_fifo_write(audioFifo_, (void**)frameToEncode->data, producedSamples);
-        if (fifoWrite < producedSamples) {
-            LOG(LL_ERR, "FFmpegEncoder::SendAudioSampleChunk - Failed to write samples into FIFO, wrote: ", fifoWrite);
-            av_frame_free(&inputFrame);
-            if (convertedFrame) av_frame_free(&convertedFrame);
-            POST();
-            return E_FAIL;
         }
 
         int targetFrameSize = audioCodecContext_->frame_size > 0 ? audioCodecContext_->frame_size : producedSamples;
@@ -961,7 +1439,7 @@ namespace Encoder {
         }
 
         LOG(LL_TRC, "FFmpegEncoder::SendAudioSampleChunk - Audio chunk accepted into FIFO");
-        
+
         POST();
         return S_OK;
     }
@@ -1080,6 +1558,27 @@ namespace Encoder {
         if (finalize) {
             if (videoCodecContext_) {
                 LOG(LL_DBG, "FFmpegEncoder::Close - Flushing video encoder");
+
+                if (videoFilterGraph_ && videoBufferSrcCtx_) {
+                    LOG(LL_DBG, "FFmpegEncoder::Close - Draining video filter graph");
+                    av_buffersrc_add_frame_flags(videoBufferSrcCtx_, nullptr, 0);
+
+                    AVFrame* filteredFrame = av_frame_alloc();
+                    while (filteredFrame) {
+                        int fgRet = av_buffersink_get_frame(videoBufferSinkCtx_, filteredFrame);
+                        if (fgRet == AVERROR_EOF || fgRet == AVERROR(EAGAIN)) {
+                            break;
+                        }
+                        if (fgRet < 0) {
+                            break;
+                        }
+                        EncodeVideoFrame(filteredFrame);
+                        av_frame_unref(filteredFrame);
+                    }
+                    av_frame_free(&filteredFrame);
+                    LOG(LL_DBG, "FFmpegEncoder::Close - Video filter graph drained");
+                }
+
                 avcodec_send_frame(videoCodecContext_, nullptr);
                 
                 while (true) {
@@ -1102,6 +1601,30 @@ namespace Encoder {
             }
             
             if (audioCodecContext_) {
+                if (audioFilterGraph_ && audioBufferSrcCtx_) {
+                    LOG(LL_DBG, "FFmpegEncoder::Close - Draining audio filter graph");
+                    av_buffersrc_add_frame_flags(audioBufferSrcCtx_, nullptr, 0);
+
+                    AVFrame* filteredFrame = av_frame_alloc();
+                    while (filteredFrame) {
+                        int fgRet = av_buffersink_get_frame(audioBufferSinkCtx_, filteredFrame);
+                        if (fgRet == AVERROR_EOF || fgRet == AVERROR(EAGAIN)) {
+                            break;
+                        }
+                        if (fgRet < 0) {
+                            break;
+                        }
+                        int fgSamples = filteredFrame->nb_samples;
+                        if (audioFifo_) {
+                            av_audio_fifo_realloc(audioFifo_, av_audio_fifo_size(audioFifo_) + fgSamples);
+                            av_audio_fifo_write(audioFifo_, (void**)filteredFrame->data, fgSamples);
+                        }
+                        av_frame_unref(filteredFrame);
+                    }
+                    av_frame_free(&filteredFrame);
+                    LOG(LL_DBG, "FFmpegEncoder::Close - Audio filter graph drained");
+                }
+
                 if (audioFifo_ && av_audio_fifo_size(audioFifo_) > 0) {
                     int frameSize = audioCodecContext_->frame_size > 0 ? audioCodecContext_->frame_size : av_audio_fifo_size(audioFifo_);
                     while (av_audio_fifo_size(audioFifo_) > 0) {
@@ -1254,6 +1777,22 @@ namespace Encoder {
         if (swrContext_) {
             swr_free(&swrContext_);
             LOG(LL_DBG, "FFmpegEncoder::Cleanup - SWR context freed");
+        }
+
+        if (videoFilterGraph_) {
+            avfilter_graph_free(&videoFilterGraph_);
+            videoFilterGraph_ = nullptr;
+            videoBufferSrcCtx_ = nullptr;
+            videoBufferSinkCtx_ = nullptr;
+            LOG(LL_DBG, "FFmpegEncoder::Cleanup - Video filter graph freed");
+        }
+
+        if (audioFilterGraph_) {
+            avfilter_graph_free(&audioFilterGraph_);
+            audioFilterGraph_ = nullptr;
+            audioBufferSrcCtx_ = nullptr;
+            audioBufferSinkCtx_ = nullptr;
+            LOG(LL_DBG, "FFmpegEncoder::Cleanup - Audio filter graph freed");
         }
         
         if (formatContext_) {
