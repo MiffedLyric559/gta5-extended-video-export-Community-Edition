@@ -975,12 +975,6 @@ namespace Encoder {
             inputFrame->linesize[i] = frame.rowsize[i];
         }
 
-        // This might not be needed?
-        if (frame.planes == 1 && (inputPixelFormat == AV_PIX_FMT_NV12 || inputPixelFormat == AV_PIX_FMT_NV21)) {
-            inputFrame->data[1] = frame.buffer[0] + frame.rowsize[0] * frame.height;
-            inputFrame->linesize[1] = frame.rowsize[0];
-        }
-
         if (strlen(config_.video.filters) > 0 && !videoFilterGraph_) {
             LOG(LL_DBG, "FFmpegEncoder::SendVideoFrame - Initializing video filter graph");
             HRESULT fghr = InitializeVideoFilterGraph(static_cast<int>(inputPixelFormat), frame.width, frame.height);
