@@ -189,7 +189,6 @@ echo Building project...
 cmake --build build --config %BUILD_TYPE%
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Build failed
-    pause
     exit /b 1
 )
 

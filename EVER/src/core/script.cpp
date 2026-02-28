@@ -1,5 +1,6 @@
 // TODO: Split this codebase into multiple files.
 #include "script.h"
+#include "CrashHandler.h"
 #include "MFUtility.h"
 #include "EncoderSession.h"
 #include "HookDefinitions.h"
@@ -1081,6 +1082,28 @@ void ever::initialize() {
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryA);
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryW);
 
+        LOG(LL_NFO, "Hooking SetUnhandledExceptionFilter (will log GTA V's UEF replacement)");
+        if (FAILED(::ever::hooking::hookNamedImport(
+                "kernel32.dll", "SetUnhandledExceptionFilter",
+                ImportHooks::SetUnhandledExceptionFilter::Implementation,
+                &ImportHooks::SetUnhandledExceptionFilter::OriginalFunc,
+                ImportHooks::SetUnhandledExceptionFilter::Hook))) {
+            LOG(LL_WRN, "SetUnhandledExceptionFilter IAT hook failed (non-fatal - VEH still active)");
+        } else {
+            LOG(LL_NFO, "SetUnhandledExceptionFilter IAT hook installed");
+        }
+
+        LOG(LL_NFO, "Hooking MessageBoxW (will capture GTA V fatal error dialogs)");
+        if (FAILED(::ever::hooking::hookNamedImport(
+                "user32.dll", "MessageBoxW",
+                ImportHooks::MessageBoxW::Implementation,
+                &ImportHooks::MessageBoxW::OriginalFunc,
+                ImportHooks::MessageBoxW::Hook))) {
+            LOG(LL_WRN, "MessageBoxW IAT hook failed (non-fatal - RAGE error messages won't be pre-captured)");
+        } else {
+            LOG(LL_NFO, "MessageBoxW IAT hook installed - GTA V fatal error dialogs will be captured");
+        }
+
         patternScanner.reset(new ever::hooking::PatternScanner());
         patternScanner->initialize();
 
@@ -1303,6 +1326,43 @@ HMODULE ImportHooks::LoadLibraryA::Implementation(LPCSTR lp_lib_file_name) {
     }
     POST();
     return result;
+}
+
+LPTOP_LEVEL_EXCEPTION_FILTER
+ImportHooks::SetUnhandledExceptionFilter::Implementation(
+    LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter)
+{
+    LOG(LL_WRN, "[CrashHandler] GTA V is calling SetUnhandledExceptionFilter, "
+        "replacing our UEF with handler at 0x",
+        Logger::hex(reinterpret_cast<uint64_t>(lpTopLevelExceptionFilter), 16));
+    LOG(LL_WRN, "[CrashHandler] Our Vectored Exception Handler (VEH) is "
+        "UNAFFECTED by this – it will still fire first on any crash.");
+
+    // Let GTA install its handler normally.
+    return OriginalFunc(lpTopLevelExceptionFilter);
+}
+
+int ImportHooks::MessageBoxW::Implementation(
+    HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType)
+{
+    // Exact flags used by diagTerminate
+    constexpr UINT kRageFatalFlags = MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST;
+
+    if ((uType & kRageFatalFlags) == kRageFatalFlags && lpText) {
+        // Convert the wide error string to narrow UTF-8 for the crash handler
+        char narrowText[2048]    = {};
+        char narrowCaption[512]  = {};
+        WideCharToMultiByte(CP_UTF8, 0, lpText,    -1, narrowText,    sizeof(narrowText)    - 1, nullptr, nullptr);
+        WideCharToMultiByte(CP_UTF8, 0, lpCaption, -1, narrowCaption, sizeof(narrowCaption) - 1, nullptr, nullptr);
+
+        char combined[2600];
+        snprintf(combined, sizeof(combined), "[%s] %s", narrowCaption, narrowText);
+
+        // Store for the crash handler (thread-safe Interlocked write in RecordRageErrorMessage)
+        ever::crash::RecordRageErrorMessage(combined);
+    }
+
+    return OriginalFunc(hWnd, lpText, lpCaption, uType);
 }
 
 void ID3D11DeviceContextHooks::OMSetRenderTargets::Implementation(ID3D11DeviceContext* p_this, UINT num_views,
@@ -2113,163 +2173,6 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     LOG(LL_DBG, "StartBakeProject original returned:", result);
     POST();
     return result;
-}
-
-void GameHooks::CleanupReplayPlaybackInternal::Implementation() {
-    PRE();
-    
-    LOG(LL_NFO, "=== CleanupReplayPlaybackInternal called ===");
-    
-    if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
-        LOG(LL_NFO, "Intercepting cleanup after Pass 1 - preserving state for Pass 2");
-        LOG(LL_NFO, "  Audio buffer size: ", dualPassContext->audio_buffer.size(), " bytes");
-        LOG(LL_NFO, "  Audio duration: ~", 
-                   (dualPassContext->audio_buffer.size() / dualPassContext->audio_block_align / dualPassContext->audio_sample_rate), 
-                   " seconds");
-        
-        LOG(LL_DBG, "Skipping original CleanupReplayPlaybackInternal - preserving state");
-        
-        // Transition to PASS2_PENDING
-        dualPassContext->state = DualPassState::PASS2_PENDING;
-        LOG(LL_NFO, "State changed to PASS2_PENDING");
-        
-        // Spawn thread to trigger Pass 2 after short delay
-        std::thread([]{
-            LOG(LL_NFO, "=== Pass 2 Trigger Thread Started ===");
-            LOG(LL_NFO, "Waiting 1 second before triggering Pass 2...");
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            
-            if (!dualPassContext) {
-                LOG(LL_ERR, "dualPassContext was destroyed during wait!");
-                return;
-            }
-            
-            if (dualPassContext->state != DualPassState::PASS2_PENDING) {
-                LOG(LL_WRN, "State changed during wait - aborting Pass 2 trigger");
-                LOG(LL_WRN, "  Current state: ", static_cast<int>(dualPassContext->state));
-                return;
-            }
-            
-            if (!dualPassContext->saved_video_editor_interface) {
-                LOG(LL_ERR, "Missing saved videoEditorInterface pointer!");
-                dualPassContext->state = DualPassState::IDLE;
-                return;
-            }
-            
-            if (!dualPassContext->saved_montage_ptr) {
-                LOG(LL_ERR, "Missing saved montage pointer!");
-                dualPassContext->state = DualPassState::IDLE;
-                return;
-            }
-            
-            if (!GameHooks::StartBakeProject::OriginalFunc) {
-                LOG(LL_ERR, "StartBakeProject OriginalFunc is null!");
-                dualPassContext->state = DualPassState::IDLE;
-                return;
-            }
-            
-            LOG(LL_NFO, "Triggering Pass 2 (Video Export)");
-            LOG(LL_DBG, "  videoEditorInterface: ", dualPassContext->saved_video_editor_interface);
-            LOG(LL_DBG, "  montage: ", dualPassContext->saved_montage_ptr);
-            LOG(LL_DBG, "  Audio buffer ready: ", dualPassContext->audio_buffer.size(), " bytes");
-            
-            dualPassContext->state = DualPassState::PASS2_RUNNING;
-            LOG(LL_NFO, "State changed to PASS2_RUNNING");
-            
-            bool result = GameHooks::StartBakeProject::OriginalFunc(
-                dualPassContext->saved_video_editor_interface,
-                dualPassContext->saved_montage_ptr
-            );
-            
-            if (result) {
-                LOG(LL_NFO, "Pass 2 started successfully!");
-                LOG(LL_NFO, "  Will replay ", dualPassContext->audio_buffer.size(), 
-                           " bytes of buffered audio");
-            } else {
-                LOG(LL_ERR, "Failed to start Pass 2!");
-                LOG(LL_ERR, "  GTA V rejected the StartBakeProject call");
-                dualPassContext->state = DualPassState::IDLE;
-                
-                // Now do the full cleanup we skipped earlier
-                LOG(LL_NFO, "Performing delayed cleanup after Pass 2 failure");
-                if (GameHooks::CleanupReplayPlaybackInternal::OriginalFunc) {
-                    GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
-                }
-            }
-        }).detach();
-        
-    } else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
-        // Pass 2 completed
-        LOG(LL_NFO, "Pass 2 complete - performing full cleanup");
-        LOG(LL_DBG, "  Final output file: ", dualPassContext->final_output_file);
-        
-        GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
-        
-        // Reset dual-pass context for next render
-        LOG(LL_NFO, "Resetting dual-pass context");
-        dualPassContext->audio_buffer.clear();
-        dualPassContext->audio_buffer.shrink_to_fit();
-        dualPassContext->saved_video_editor_interface = nullptr;
-        dualPassContext->saved_montage_ptr = nullptr;
-        dualPassContext->timestamp.clear();
-        dualPassContext->final_output_file.clear();
-        dualPassContext->original_fps = {0, 0};
-        dualPassContext->original_motion_blur_samples = 0;
-        dualPassContext->audio_sample_rate = 48000;
-        dualPassContext->audio_channels = 2;
-        dualPassContext->audio_bits_per_sample = 16;
-        dualPassContext->audio_block_align = 4;
-        dualPassContext->audio_buffer_playback_position = 0;
-        dualPassContext->state = DualPassState::IDLE;
-        
-        LOG(LL_NFO, "Dual-pass rendering fully complete and cleaned up");
-        
-    } else {
-        LOG(LL_DBG, "Normal cleanup execution");
-        if (dualPassContext) {
-            LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
-        }
-        
-        GameHooks::CleanupReplayPlaybackInternal::OriginalFunc();
-        
-        // Reset dual-pass if it was somehow left in a bad state
-        if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
-            LOG(LL_WRN, "Resetting stale dual-pass context during normal cleanup");
-            dualPassContext->state = DualPassState::IDLE;
-            dualPassContext->audio_buffer.clear();
-            dualPassContext->audio_buffer.shrink_to_fit();
-        }
-    }
-    
-    LOG(LL_NFO, "CleanupReplayPlaybackInternal exit");
-    POST();
-}
-
-bool GameHooks::IsPendingBakeStart::Implementation() {
-    PRE();
-    
-    bool originalResult = GameHooks::IsPendingBakeStart::OriginalFunc();
-    
-    LOG(LL_TRC, "IsPendingBakeStart called, original result: ", originalResult);
-    
-    // Override result during dual-pass transitions to keep loading screen visible
-    if (dualPassContext) {
-        if (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
-            dualPassContext->state == DualPassState::PASS2_PENDING) {
-            LOG(LL_DBG, "IsPendingBakeStart: Overriding to TRUE for dual-pass transition");
-            LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
-            POST();
-            return true;
-        }
-    }
-    
-    // Normal behavior
-    if (dualPassContext && originalResult) {
-        LOG(LL_TRC, "IsPendingBakeStart: Dual-pass state: ", static_cast<int>(dualPassContext->state));
-    }
-    
-    POST();
-    return originalResult;
 }
 
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {

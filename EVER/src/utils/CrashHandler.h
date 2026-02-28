@@ -16,5 +16,6 @@ namespace ever {
     namespace crash {
         void Initialize();
         void Cleanup();
+        void RecordRageErrorMessage(const char* msg);
     }
 }

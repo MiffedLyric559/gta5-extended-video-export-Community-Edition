@@ -83,6 +83,16 @@ DEFINE_NAMED_IMPORT_HOOK("kernel32.dll", LoadLibraryW, HMODULE,
 DEFINE_NAMED_IMPORT_HOOK("kernel32.dll", LoadLibraryA, HMODULE,
                          LPCSTR lpLibFileName);
 
+DEFINE_NAMED_IMPORT_HOOK("kernel32.dll", SetUnhandledExceptionFilter,
+                         LPTOP_LEVEL_EXCEPTION_FILTER,
+                         LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter);
+
+DEFINE_NAMED_IMPORT_HOOK("user32.dll", MessageBoxW, int,
+                         HWND    hWnd,
+                         LPCWSTR lpText,
+                         LPCWSTR lpCaption,
+                         UINT    uType);
+
 DEFINE_NAMED_EXPORT_HOOK("d3d11.dll", D3D11CreateDeviceAndSwapChain, HRESULT,
                          IDXGIAdapter* pAdapter,
                          D3D_DRIVER_TYPE driverType,
@@ -127,8 +137,3 @@ DEFINE_X64_HOOK(CreateExportContext, uint8_t,
 DEFINE_X64_HOOK(StartBakeProject, bool,
                 void* videoEditorInterface,  // this pointer (RCX)
                 void* montage);              // CReplayMontage* (RDX)
-
-// Dual-pass cleanup and UI control hooks
-DEFINE_X64_HOOK(CleanupReplayPlaybackInternal, void);
-
-DEFINE_X64_HOOK(IsPendingBakeStart, bool);
