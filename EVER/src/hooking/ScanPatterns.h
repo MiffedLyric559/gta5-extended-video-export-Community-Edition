@@ -42,6 +42,9 @@ namespace ever {
             const std::string startBakeProject = 
                 "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 40 32 FF 48 83 3D ?? ?? ?? ?? 00 48 8B DA 48 8B F1";
 
+            // CVideoEditorUi::TriggerExport
+            const std::string triggerExport_b3751 = "83 CA FF 8D 4A 02 E8 ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 01 EB ?? 48 83 64 24 28 00 48 83 64 24 20 00 45 33 C9 45 8D 41 02 48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ??";
+
             // Watermark rendering
             const std::string watermarkRendererRender = 
                 "48 83 EC ?? 8B 0D ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? BA ?? ?? ?? ?? 48 8B 04 C8 8B 0C 02 D1 E9 F6 C1 ?? 74 ?? 83 3D";
@@ -54,10 +57,34 @@ namespace ever {
             const std::string isPendingBakeStart =
                 "83 3D ?? ?? ?? ?? ?? 0F 94 C0 C3 CC 40 53 48 83 EC ?? 8B 0D";
 
+            // Is pending cleanup
+            const std::string isPendingCleanup =
+                "83 3D ?? ?? ?? ?? 08 0F 94 C0 C3";
+
+            // Has video render errored
+            const std::string hasVideoRenderErrored =
+                "40 53 48 83 EC ?? 8B 0D ?? ?? ?? ?? 33 DB 83 F9 FF 74 ??";
+
+            // Should show loading screen
+            const std::string shouldShowLoadingScreen =
+                "40 53 48 83 EC 20 33 DB 83 3D ?? ?? ?? ?? 02 74 ?? "
+                "8B 0D ?? ?? ?? ?? 8B C1 C1 E8 05 A8 01 75 ??";
+
+            // Set user confirmation screen
+            const std::string setUserConfirmationScreen =
+                "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 "
+                "41 8A D9 41 8B F8 48 8B C2 48 8B F1 48 85 D2 75 ??";
+
             // Kill playback or bake
-            // Need to get inline setState function to work properly.
             const std::string killPlaybackOrBake =
                 "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 40 8A 7D 50 4D 8B F9 41 8A F0 48 8B DA 4C 8B F1 45 84 C0 74";
+
+            // CVideoEditorPlayback::Close
+            const std::string closeFunctionPivot =
+                "83 F8 01 75 ?? E8 ?? ?? ?? ?? B9 02 00 00 00 E8 ?? ?? ?? ?? EB ??";
+
+            // CVideoEditorPlayback::CleanupLoadingScreen
+            const std::string cleanupLoadingScreen = "33 C9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? B9 05 00 00 00 E8";
 
         }
     }

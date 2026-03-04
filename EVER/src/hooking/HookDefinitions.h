@@ -137,3 +137,13 @@ DEFINE_X64_HOOK(CreateExportContext, uint8_t,
 DEFINE_X64_HOOK(StartBakeProject, bool,
                 void* videoEditorInterface,  // this pointer (RCX)
                 void* montage);              // CReplayMontage* (RDX)
+
+// CVideoEditorInterface::HasVideoRenderErrored
+DEFINE_X64_HOOK(HasVideoRenderErrored, bool);
+
+// CReplayCoordinator::ShouldShowLoadingScreen
+DEFINE_X64_HOOK(ShouldShowLoadingScreen, bool);
+
+// CVideoEditorPlayback::Close
+DEFINE_X64_HOOK(SetExportMenuMode, void,
+                int mode);

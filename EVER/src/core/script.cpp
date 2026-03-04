@@ -191,6 +191,19 @@ namespace {
     using KillPlaybackOrBakeFunc = void(*)(void* thisPtr, bool userCancelled);
     KillPlaybackOrBakeFunc pKillPlaybackOrBakeOriginal = nullptr;
     uint8_t g_killPlaybackOrBakeOriginalBytes[12] = {0};
+
+    // SetUserConfirmationScreen hook (manual hook with unhook/rehook pattern)
+    using SetUserConfirmationScreenFunc = void(*)(const char* pTextLabel,
+                                                 const char* pTitle,
+                                                 uint32_t type,
+                                                 bool allowSpinner,
+                                                 const char* literalString,
+                                                 const char* literalString2);
+    SetUserConfirmationScreenFunc pSetUserConfirmationScreenOriginal = nullptr;
+    uint8_t g_setUserConfirmationScreenOriginalBytes[12] = {0};
+
+    std::atomic_bool g_pass2TriggerIssued = false;
+    uint8_t* g_wantDelayedClosePtr = nullptr;
     
     // Store IsPendingBakeStart address for hook to access
     uint64_t g_isPendingBakeStartAddress = 0;
@@ -410,6 +423,105 @@ namespace {
         }
     }
 
+    const char* dualPassStateName(DualPassState state) {
+        switch (state) {
+            case DualPassState::IDLE: return "IDLE";
+            case DualPassState::PASS1_RUNNING: return "PASS1_RUNNING";
+            case DualPassState::PASS1_COMPLETE: return "PASS1_COMPLETE";
+            case DualPassState::PASS2_PENDING: return "PASS2_PENDING";
+            case DualPassState::PASS2_RUNNING: return "PASS2_RUNNING";
+            case DualPassState::PASS2_COMPLETE: return "PASS2_COMPLETE";
+            default: return "UNKNOWN";
+        }
+    }
+
+    bool isPass1SuccessLabel(const char* pTextLabel) {
+        if (!pTextLabel) {
+            return false;
+        }
+
+        return std::strcmp(pTextLabel, "VE_BAKE_FIN") == 0 ||
+               std::strcmp(pTextLabel, "VE_BAKE_FIN_NAMED") == 0;
+    }
+
+    bool isPass1TransitionSuppressLabel(const char* pTextLabel) {
+        if (!pTextLabel) {
+            return false;
+        }
+
+        return isPass1SuccessLabel(pTextLabel) ||
+               std::strcmp(pTextLabel, "VE_BAKE_ERROR") == 0;
+    }
+
+    bool isDualPassTransitionState() {
+        if (!dualPassContext) {
+            return false;
+        }
+
+        return dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+               dualPassContext->state == DualPassState::PASS2_PENDING;
+    }
+
+    void tryForceWantDelayedCloseFalse(const char* reason) {
+        if (!g_wantDelayedClosePtr) {
+            return;
+        }
+
+        if (!isDualPassTransitionState()) {
+            return;
+        }
+
+        if (*g_wantDelayedClosePtr) {
+            *g_wantDelayedClosePtr = 0;
+            LOG(LL_NFO, "Forced ms_bWantDelayedClose=false during dual-pass transition. reason=", reason,
+                " state=", dualPassContext ? dualPassStateName(dualPassContext->state) : "NO_CONTEXT");
+        }
+    }
+
+    void resolveWantDelayedCloseAddress(const uint64_t setUserConfirmationAddress) {
+        if (setUserConfirmationAddress == 0) {
+            return;
+        }
+
+        MODULEINFO moduleInfo{};
+        if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandle(nullptr), &moduleInfo, sizeof(moduleInfo))) {
+            LOG(LL_WRN, "resolveWantDelayedCloseAddress: GetModuleInformation failed");
+            return;
+        }
+
+        const auto imageStart = reinterpret_cast<uint8_t*>(moduleInfo.lpBaseOfDll);
+        const auto imageSize = static_cast<size_t>(moduleInfo.SizeOfImage);
+
+        for (size_t offset = 0; offset + 12 < imageSize; ++offset) {
+            uint8_t* p = imageStart + offset;
+
+            if (p[0] != 0xE8 || p[5] != 0xC6 || p[6] != 0x05 || p[11] != 0x01) {
+                continue;
+            }
+
+            const auto relCall = *reinterpret_cast<int32_t*>(p + 1);
+            const auto callTarget = reinterpret_cast<uint64_t>(p + 5 + relCall);
+            if (callTarget != setUserConfirmationAddress) {
+                continue;
+            }
+
+            const auto relStore = *reinterpret_cast<int32_t*>(p + 7);
+            uint8_t* candidate = p + 12 + relStore;
+
+            if (candidate < imageStart || candidate >= imageStart + imageSize) {
+                continue;
+            }
+
+            g_wantDelayedClosePtr = candidate;
+            LOG(LL_NFO, "ms_bWantDelayedClose candidate resolved at ",
+                Logger::hex(reinterpret_cast<uint64_t>(g_wantDelayedClosePtr), 16),
+                " (call->SetUserConfirmation+store pattern)");
+            return;
+        }
+
+        LOG(LL_WRN, "Could not resolve ms_bWantDelayedClose address from SetUserConfirmation call pattern");
+    }
+
     bool installAbsoluteJumpHook(uint64_t address, uintptr_t hookAddress) {
         if (address == 0 || hookAddress == 0) {
             return false;
@@ -489,6 +601,12 @@ namespace {
         LOG(LL_NFO, "CleanupReplayPlaybackInternal called");
         
         if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
+            if (g_pass2TriggerIssued.exchange(true)) {
+                LOG(LL_DBG, "Pass 2 trigger already issued; ignoring duplicate CleanupReplayPlaybackInternal handoff");
+                POST();
+                return;
+            }
+
             LOG(LL_NFO, "Intercepting CleanupReplayPlaybackInternal after Pass 1");
             try {
                 uint64_t cleanupAddr = reinterpret_cast<uint64_t>(pCleanupReplayPlaybackOriginal);
@@ -501,6 +619,7 @@ namespace {
                     LOG(LL_ERR, "VirtualProtect failed (restore): ", GetLastError());
                     dualPassContext->state = DualPassState::IDLE;
                     dualPassContext->audio_buffer.clear();
+                    g_pass2TriggerIssued = false;
                     POST();
                     return;
                 }
@@ -523,6 +642,7 @@ namespace {
                 LOG(LL_ERR, "Exception during unhook/rehook: ", e.what());
                 dualPassContext->state = DualPassState::IDLE;
                 dualPassContext->audio_buffer.clear();
+                g_pass2TriggerIssued = false;
                 POST();
                 return;
             }
@@ -530,6 +650,7 @@ namespace {
                 LOG(LL_ERR, "Unknown exception during unhook/rehook");
                 dualPassContext->state = DualPassState::IDLE;
                 dualPassContext->audio_buffer.clear();
+                g_pass2TriggerIssued = false;
                 POST();
                 return;
             }
@@ -545,12 +666,14 @@ namespace {
                 
                 if (!dualPassContext) {
                     LOG(LL_ERR, "Pass 2 thread: dualPassContext is NULL!");
+                    g_pass2TriggerIssued = false;
                     return;
                 }
                 
                 if (dualPassContext->state != DualPassState::PASS1_COMPLETE) {
                     LOG(LL_WRN, "Pass 2 thread: Unexpected state: ", static_cast<int>(dualPassContext->state));
                     LOG(LL_WRN, "Expected PASS1_COMPLETE (2), got: ", static_cast<int>(dualPassContext->state));
+                    g_pass2TriggerIssued = false;
                     return;
                 }
                 
@@ -572,18 +695,21 @@ namespace {
                 if (!GameHooks::StartBakeProject::OriginalFunc) {
                     LOG(LL_ERR, "StartBakeProject::OriginalFunc is NULL!");
                     dualPassContext->state = DualPassState::IDLE;
+                    g_pass2TriggerIssued = false;
                     return;
                 }
                 
                 if (!dualPassContext->saved_video_editor_interface) {
                     LOG(LL_ERR, "saved_video_editor_interface is NULL!");
                     dualPassContext->state = DualPassState::IDLE;
+                    g_pass2TriggerIssued = false;
                     return;
                 }
                 
                 if (!dualPassContext->saved_montage_ptr) {
                     LOG(LL_ERR, "saved_montage_ptr is NULL!");
                     dualPassContext->state = DualPassState::IDLE;
+                    g_pass2TriggerIssued = false;
                     return;
                 }
                 
@@ -618,6 +744,7 @@ namespace {
                     dualPassContext->state = DualPassState::IDLE;
                     dualPassContext->audio_buffer.clear();
                     dualPassContext->audio_buffer.shrink_to_fit();
+                    g_pass2TriggerIssued = false;
                 } else {
                     LOG(LL_NFO, "Pass 2 started successfully");
                     LOG(LL_DBG, "Video capture should now begin at ", Config::Manager::fps.first, "/", Config::Manager::fps.second, " FPS");
@@ -748,7 +875,9 @@ namespace {
                 ")");
         }
         
-        if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE && !userCancelled) {
+        if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
+            LOG(LL_NFO, "Suppressing KillPlaybackOrBake during PASS1_COMPLETE to preserve pass handoff");
+            tryForceWantDelayedCloseFalse("KillPlaybackOrBake_Hook(pass1-complete)");
             POST();
             return;
         }
@@ -808,6 +937,77 @@ namespace {
         }
         
         LOG(LL_NFO, "KillPlaybackOrBake_Hook exit");
+        POST();
+    }
+
+    void SetUserConfirmationScreen_Hook(const char* pTextLabel,
+                                        const char* pTitle,
+                                        uint32_t type,
+                                        bool allowSpinner,
+                                        const char* literalString,
+                                        const char* literalString2) {
+        PRE();
+
+        const std::string safeLabel = SafeAnsiString(pTextLabel);
+        const std::string safeTitle = SafeAnsiString(pTitle);
+
+        LOG(LL_DBG, "SetUserConfirmationScreen_Hook called. label=", safeLabel,
+            " title=", safeTitle,
+            " type=", type,
+            " allowSpinner=", allowSpinner,
+            " dualPass=", dualPassContext ? dualPassStateName(dualPassContext->state) : "NO_CONTEXT");
+
+        if (dualPassContext &&
+            isPass1TransitionSuppressLabel(pTextLabel) &&
+            (dualPassContext->state == DualPassState::PASS1_RUNNING ||
+             dualPassContext->state == DualPassState::PASS1_COMPLETE)) {
+
+            if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
+                dualPassContext->state = DualPassState::PASS1_COMPLETE;
+                LOG(LL_NFO, "Pass 1 completion popup suppressed. State forced to PASS1_COMPLETE");
+            } else {
+                LOG(LL_NFO, "Pass 1 completion popup suppressed. State already PASS1_COMPLETE");
+            }
+
+            if (std::strcmp(safeLabel.c_str(), "VE_BAKE_ERROR") == 0) {
+                LOG(LL_NFO, "Suppressing VE_BAKE_ERROR during PASS1 handoff (expected transient in dual-pass)");
+            }
+
+            g_pass2TriggerIssued = false;
+            tryForceWantDelayedCloseFalse("SetUserConfirmationScreen_Hook(pass1-success)");
+
+            POST();
+            return;
+        }
+
+        try {
+            uint64_t targetAddr = reinterpret_cast<uint64_t>(pSetUserConfirmationScreenOriginal);
+            DWORD oldProtect = 0;
+            if (!VirtualProtect(reinterpret_cast<void*>(targetAddr), 12, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                LOG(LL_ERR, "SetUserConfirmationScreen_Hook: VirtualProtect restore failed: ", GetLastError());
+                POST();
+                return;
+            }
+
+            std::memcpy(reinterpret_cast<void*>(targetAddr), g_setUserConfirmationScreenOriginalBytes, 12);
+            FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(targetAddr), 12);
+
+            reinterpret_cast<SetUserConfirmationScreenFunc>(targetAddr)(
+                pTextLabel,
+                pTitle,
+                type,
+                allowSpinner,
+                literalString,
+                literalString2);
+
+            installAbsoluteJumpHook(targetAddr, reinterpret_cast<uintptr_t>(&SetUserConfirmationScreen_Hook));
+            VirtualProtect(reinterpret_cast<void*>(targetAddr), 12, oldProtect, &oldProtect);
+        } catch (const std::exception& ex) {
+            LOG(LL_ERR, "SetUserConfirmationScreen_Hook exception: ", ex.what());
+        } catch (...) {
+            LOG(LL_ERR, "SetUserConfirmationScreen_Hook unknown exception");
+        }
+
         POST();
     }
 
@@ -1119,6 +1319,9 @@ void ever::initialize() {
         uint64_t pCleanupReplayPlayback = NULL;
         uint64_t pIsPendingBakeStart = NULL;
         uint64_t pKillPlaybackOrBake = NULL;
+        uint64_t pSetUserConfirmationScreen = NULL;
+        uint64_t pHasVideoRenderErrored = NULL;
+        uint64_t pShouldShowLoadingScreen = NULL;
         
         patternScanner->addPattern("get_render_time_base_function", 
                                     ever::hooking::patterns::getRenderTimeBase, 
@@ -1144,6 +1347,15 @@ void ever::initialize() {
         patternScanner->addPattern("kill_playback_or_bake", 
                                     ever::hooking::patterns::killPlaybackOrBake, 
                                     &pKillPlaybackOrBake);
+        patternScanner->addPattern("set_user_confirmation_screen",
+                        ever::hooking::patterns::setUserConfirmationScreen,
+                        &pSetUserConfirmationScreen);
+        patternScanner->addPattern("has_video_render_errored",
+                ever::hooking::patterns::hasVideoRenderErrored,
+                &pHasVideoRenderErrored);
+        patternScanner->addPattern("should_show_loading_screen",
+                ever::hooking::patterns::shouldShowLoadingScreen,
+                &pShouldShowLoadingScreen);
         patternScanner->performScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
@@ -1154,6 +1366,9 @@ void ever::initialize() {
         logResolvedHookTarget("CleanupReplayPlaybackInternal", pCleanupReplayPlayback);
         logResolvedHookTarget("IsPendingBakeStart", pIsPendingBakeStart);
         logResolvedHookTarget("KillPlaybackOrBake", pKillPlaybackOrBake);
+        logResolvedHookTarget("SetUserConfirmationScreen", pSetUserConfirmationScreen);
+        logResolvedHookTarget("HasVideoRenderErrored", pHasVideoRenderErrored);
+        logResolvedHookTarget("ShouldShowLoadingScreen", pShouldShowLoadingScreen);
 
         try {
             if (pGetRenderTimeBase) {
@@ -1254,6 +1469,43 @@ void ever::initialize() {
                 LOG(LL_WRN, "Could not find KillPlaybackOrBake function.");
                 LOG(LL_WRN, "Dual-pass rendering may experience 'insufficient storage' errors on consecutive renders!");
             }
+
+            if (pSetUserConfirmationScreen) {
+                pSetUserConfirmationScreenOriginal = reinterpret_cast<SetUserConfirmationScreenFunc>(pSetUserConfirmationScreen);
+
+                std::memcpy(g_setUserConfirmationScreenOriginalBytes,
+                            reinterpret_cast<void*>(pSetUserConfirmationScreen),
+                            12);
+
+                installAbsoluteJumpHook(pSetUserConfirmationScreen,
+                    reinterpret_cast<uintptr_t>(&SetUserConfirmationScreen_Hook));
+
+                LOG(LL_NFO, "SetUserConfirmationScreen manual hook installed successfully");
+                LOG(LL_DBG, "  Original function: ", reinterpret_cast<void*>(pSetUserConfirmationScreen));
+
+                resolveWantDelayedCloseAddress(pSetUserConfirmationScreen);
+            } else {
+                LOG(LL_WRN, "Could not find SetUserConfirmationScreen function.");
+                LOG(LL_WRN, "Pass 1 completion popup suppression will not work reliably.");
+            }
+
+            if (pHasVideoRenderErrored) {
+                PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(HasVideoRenderErrored, pHasVideoRenderErrored,
+                                                      PLH::x64Detour::detour_scheme_t::INPLACE);
+                LOG(LL_NFO, "HasVideoRenderErrored hook installed. trampoline:",
+                    reinterpret_cast<void*>(GameHooks::HasVideoRenderErrored::OriginalFunc));
+            } else {
+                LOG(LL_WRN, "Could not find HasVideoRenderErrored function.");
+            }
+
+            if (pShouldShowLoadingScreen) {
+                PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(ShouldShowLoadingScreen, pShouldShowLoadingScreen,
+                                                      PLH::x64Detour::detour_scheme_t::INPLACE);
+                LOG(LL_NFO, "ShouldShowLoadingScreen hook installed. trampoline:",
+                    reinterpret_cast<void*>(GameHooks::ShouldShowLoadingScreen::OriginalFunc));
+            } else {
+                LOG(LL_WRN, "Could not find ShouldShowLoadingScreen function.");
+            }
             
             if (Config::Manager::disable_watermark) {
                 PERFORM_SINGLE_BYTE_PATCH(pWatermarkRenderer, 0xC3, "Watermark renderer");
@@ -1278,6 +1530,38 @@ void ever::ScriptMain() {
     while (true) {
         if (!isD3D11HookInstalled) {
             ensureD3D11Hook();
+        }
+
+        if (dualPassContext) {
+            if (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+                dualPassContext->state == DualPassState::PASS2_PENDING) {
+                tryForceWantDelayedCloseFalse("ScriptMain-loop");
+            }
+
+            if (dualPassContext->state == DualPassState::PASS1_COMPLETE &&
+                !g_pass2TriggerIssued.load() &&
+                pCleanupReplayPlaybackOriginal != nullptr) {
+                LOG(LL_NFO, "PASS1_COMPLETE detected in ScriptMain. Triggering cleanup gate for pass 2.");
+                g_pass2TriggerIssued = true;
+
+                try {
+                    reinterpret_cast<CleanupReplayPlaybackInternalFunc>(pCleanupReplayPlaybackOriginal)();
+                    LOG(LL_NFO, "Cleanup trigger dispatched from ScriptMain for pass-2 startup");
+                } catch (const std::exception& ex) {
+                    LOG(LL_ERR, "ScriptMain pass-2 cleanup trigger exception: ", ex.what());
+                    g_pass2TriggerIssued = false;
+                } catch (...) {
+                    LOG(LL_ERR, "ScriptMain pass-2 cleanup trigger unknown exception");
+                    g_pass2TriggerIssued = false;
+                }
+            }
+
+            if (dualPassContext->state == DualPassState::IDLE ||
+                dualPassContext->state == DualPassState::PASS2_COMPLETE) {
+                g_pass2TriggerIssued = false;
+            }
+        } else {
+            g_pass2TriggerIssued = false;
         }
         
         WAIT(0);
@@ -1934,14 +2218,21 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
                 HRESULT result = OriginalFunc(pThis);
                 
                 LOG(LL_NFO, "Original Finalize returned: ", Logger::hex(result, 8));
+                LOG(LL_NFO, "Pass 1: overriding Finalize return to S_OK for handoff stability");
                 LOG(LL_NFO, "Recording instance should be preserved for Pass 2");
                 LOG(LL_NFO, "Waiting for CleanupReplayPlaybackInternal to trigger Pass 2...");
                 
                 LOG_CALL(LL_DBG, encodingSession.reset());
                 LOG_CALL(LL_DBG, ::exportContext.reset());
+
+                if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
+                    LOG(LL_NFO, "Pass 1 finalize fallback: invoking CleanupReplayPlaybackInternal handoff directly");
+                    CleanupReplayPlaybackInternal_Hook();
+                }
+
                 LOG(LL_NFO, "IMFSinkWriter::Finalize exit (Pass 1)");
                 POST();
-                return result;
+                return S_OK;
                 
             } else if (dualPassContext && dualPassContext->state == DualPassState::PASS2_RUNNING) {
                 // Pass 2 complete
@@ -2154,6 +2445,7 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
             dualPassContext->original_motion_blur_samples = Config::Manager::motion_blur_samples;
             dualPassContext->saved_video_editor_interface = videoEditorInterface;
             dualPassContext->saved_montage_ptr = montage;
+            g_pass2TriggerIssued = false;
             
             LOG(LL_NFO, "  PASS 1 will capture audio at 30 FPS, 0 motion blur");
             LOG(LL_NFO, "  PASS 2 will capture video at ", Config::Manager::fps.first, "/", Config::Manager::fps.second, 
@@ -2165,6 +2457,7 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
             if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
                 LOG(LL_WRN, "Dual-pass context was not IDLE - resetting");
                 dualPassContext->state = DualPassState::IDLE;
+                g_pass2TriggerIssued = false;
             }
         }
     }
@@ -2173,6 +2466,45 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     LOG(LL_DBG, "StartBakeProject original returned:", result);
     POST();
     return result;
+}
+
+bool GameHooks::HasVideoRenderErrored::Implementation() {
+    PRE();
+    const bool originalResult = OriginalFunc();
+
+    if (dualPassContext &&
+        (dualPassContext->state == DualPassState::PASS1_RUNNING ||
+         dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+         dualPassContext->state == DualPassState::PASS2_PENDING)) {
+        if (originalResult) {
+            LOG(LL_NFO, "Suppressing HasVideoRenderErrored=true during dual-pass handoff. state=",
+                dualPassStateName(dualPassContext->state));
+        }
+        POST();
+        return false;
+    }
+
+    POST();
+    return originalResult;
+}
+
+bool GameHooks::ShouldShowLoadingScreen::Implementation() {
+    PRE();
+    const bool originalResult = OriginalFunc();
+
+    if (dualPassContext &&
+        (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
+         dualPassContext->state == DualPassState::PASS2_PENDING)) {
+        if (!originalResult) {
+            LOG(LL_DBG, "Forcing loading screen ON during dual-pass handoff. state=",
+                dualPassStateName(dualPassContext->state));
+        }
+        POST();
+        return true;
+    }
+
+    POST();
+    return originalResult;
 }
 
 float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {

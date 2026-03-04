@@ -2,6 +2,24 @@
 #include "logger.h"
 #include <polyhook2/Misc.hpp>
 
+namespace {
+    uint64_t findPatternSafe(uint64_t moduleBase, size_t moduleSize, const char* pattern, DWORD* outExceptionCode) {
+        if (outExceptionCode) {
+            *outExceptionCode = 0;
+        }
+
+        __try {
+            return PLH::findPattern(moduleBase, moduleSize, pattern);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            if (outExceptionCode) {
+                *outExceptionCode = ::GetExceptionCode();
+            }
+            return 0;
+        }
+    }
+}
+
 namespace ever {
     namespace hooking {
         void PatternScanner::initialize() {
@@ -33,11 +51,21 @@ namespace ever {
             PRE();
 
             for (const auto& [name, entry] : patterns_) {
-                const auto address = PLH::findPattern(
+                LOG(LL_DBG, "Scanning pattern '", name, "' (len=", entry.pattern.size(), ")");
+
+                DWORD scanException = 0;
+                const uint64_t address = findPatternSafe(
                     reinterpret_cast<uint64_t>(moduleInfo_.lpBaseOfDll),
-                    moduleInfo_.SizeOfImage, 
-                    entry.pattern.c_str()
+                    static_cast<size_t>(moduleInfo_.SizeOfImage),
+                    entry.pattern.c_str(),
+                    &scanException
                 );
+
+                if (scanException != 0) {
+                    *entry.destination = 0;
+                    LOG(LL_ERR, "Pattern '", name, "' scan crashed with SEH ", Logger::hex(scanException, 8));
+                    continue;
+                }
                 
                 *entry.destination = address;
                 

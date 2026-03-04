@@ -814,6 +814,80 @@ namespace Encoder {
     HRESULT FFmpegEncoder::ParseEncoderOptions(const char* optionsString, AVCodecContext* codecContext) {
         PRE();
         LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Parsing options: ", optionsString);
+
+        auto parseBitrateToBitsPerSecond = [](const std::string& input, int64_t& output) -> bool {
+            if (input.empty()) return false;
+
+            std::string value = input;
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            if (value.empty()) return false;
+
+            double multiplier = 1.0;
+            char suffix = value.back();
+            if (suffix == 'k' || suffix == 'K') {
+                multiplier = 1000.0;
+                value.pop_back();
+            } else if (suffix == 'm' || suffix == 'M') {
+                multiplier = 1000000.0;
+                value.pop_back();
+            } else if (suffix == 'g' || suffix == 'G') {
+                multiplier = 1000000000.0;
+                value.pop_back();
+            }
+
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            if (value.empty()) return false;
+
+            char* endPtr = nullptr;
+            double parsed = std::strtod(value.c_str(), &endPtr);
+            if (endPtr == value.c_str() || *endPtr != '\0' || parsed <= 0.0) {
+                return false;
+            }
+
+            output = static_cast<int64_t>(parsed * multiplier);
+            return output > 0;
+        };
+
+        auto parseFrameRateToRational = [](const std::string& input, AVRational& output) -> bool {
+            if (input.empty()) return false;
+
+            std::string value = input;
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            if (value.empty()) return false;
+
+            size_t slashPos = value.find('/');
+            if (slashPos != std::string::npos) {
+                std::string numStr = value.substr(0, slashPos);
+                std::string denStr = value.substr(slashPos + 1);
+
+                char* endNum = nullptr;
+                char* endDen = nullptr;
+                long long num = std::strtoll(numStr.c_str(), &endNum, 10);
+                long long den = std::strtoll(denStr.c_str(), &endDen, 10);
+
+                if (endNum == numStr.c_str() || *endNum != '\0' || endDen == denStr.c_str() || *endDen != '\0') {
+                    return false;
+                }
+                if (num <= 0 || den <= 0) {
+                    return false;
+                }
+
+                output = AVRational{ static_cast<int>(num), static_cast<int>(den) };
+                return true;
+            }
+
+            char* endPtr = nullptr;
+            double fps = std::strtod(value.c_str(), &endPtr);
+            if (endPtr == value.c_str() || *endPtr != '\0' || fps <= 0.0) {
+                return false;
+            }
+
+            output = av_d2q(fps, 1000000);
+            return output.num > 0 && output.den > 0;
+        };
         
         if (!optionsString || strlen(optionsString) == 0) {
             LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - No options to parse");
@@ -886,6 +960,34 @@ namespace Encoder {
                     optionCount++;
                 } else {
                     LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Unknown scaling algorithm: ", value, ", using bilinear");
+                }
+            } else if (key == "rc_min_rate" || key == "minrate") {
+                int64_t parsedRate = 0;
+                if (parseBitrateToBitsPerSecond(value, parsedRate)) {
+                    codecContext->rc_min_rate = parsedRate;
+                    LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Set rc_min_rate: ", parsedRate);
+                    optionCount++;
+                } else {
+                    LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Invalid rc_min_rate/minrate value: ", value);
+                }
+            } else if (key == "rc_max_rate" || key == "maxrate") {
+                int64_t parsedRate = 0;
+                if (parseBitrateToBitsPerSecond(value, parsedRate)) {
+                    codecContext->rc_max_rate = parsedRate;
+                    LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Set rc_max_rate: ", parsedRate);
+                    optionCount++;
+                } else {
+                    LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Invalid rc_max_rate/maxrate value: ", value);
+                }
+            } else if (key == "r" || key == "frame_rate" || key == "framerate") {
+                AVRational parsedRate = {0, 1};
+                if (parseFrameRateToRational(value, parsedRate)) {
+                    codecContext->framerate = parsedRate;
+                    codecContext->time_base = av_inv_q(parsedRate);
+                    LOG(LL_DBG, "FFmpegEncoder::ParseEncoderOptions - Set framerate: ", parsedRate.num, "/", parsedRate.den);
+                    optionCount++;
+                } else {
+                    LOG(LL_WRN, "FFmpegEncoder::ParseEncoderOptions - Invalid r/frame_rate value: ", value);
                 }
             } else {
                 int ret = av_opt_set(codecContext->priv_data, key.c_str(), value.c_str(), 0);

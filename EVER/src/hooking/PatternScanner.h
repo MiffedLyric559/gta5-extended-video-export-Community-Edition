@@ -24,6 +24,9 @@ namespace ever {
 
             void addPattern(const std::string& name, const std::string& pattern, uint64_t* destination);
 
+            uint64_t getModuleBase() const { return reinterpret_cast<uint64_t>(moduleInfo_.lpBaseOfDll); }
+            size_t   getModuleSize() const { return static_cast<size_t>(moduleInfo_.SizeOfImage); }
+
         private:
             struct PatternEntry {
                 std::string pattern;
