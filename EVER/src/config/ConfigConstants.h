@@ -20,7 +20,7 @@
 
 // Editor section
 #define CFG_EDITOR_SECTION "EDITOR"
-#define CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT "disable_replay_camera_distance_limit"
+#define CFG_DISABLE_EDITOR_CAMERA_DISTANCE_LIMIT "disable_editor_camera_distance_limit"
 
 // Format section
 #define CFG_FORMAT_SECTION "FORMAT"

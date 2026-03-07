@@ -2539,7 +2539,7 @@ float GameHooks::GetMaxDistanceAllowedFromPlayer::Implementation(void* thisPtr,
     PRE();
 
     static bool s_lastBypassState = false;
-    const bool bypassDistanceLimit = Config::Manager::disable_replay_camera_distance_limit;
+    const bool bypassDistanceLimit = Config::Manager::disable_editor_camera_distance_limit;
     if (bypassDistanceLimit != s_lastBypassState) {
         LOG(LL_NFO, "Replay camera distance limit bypass ", bypassDistanceLimit ? "ENABLED" : "DISABLED");
         s_lastBypassState = bypassDistanceLimit;
