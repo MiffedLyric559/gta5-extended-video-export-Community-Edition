@@ -5,10 +5,10 @@
     "faststart": true
   },
   "video": {
-    "codec": "h264_nvenc",
-    "preset": "lossless",
+    "codec": "libx264",
+    "preset": "medium",
     "pass": "1",
-    "crf": "none",
+    "crf": "1",
     "bitrate": "auto",
     "minrate": "auto",
     "maxrate": "auto",
@@ -18,7 +18,7 @@
     "frame_rate": "auto",
     "speed": "auto",
     "tune": "none",
-    "profile": "high",
+    "profile": "none",
     "level": "none",
     "faststart": true,
     "size": "auto",
