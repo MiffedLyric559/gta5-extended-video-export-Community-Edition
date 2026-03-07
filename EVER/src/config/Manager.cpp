@@ -39,16 +39,21 @@ namespace Config {
         const string ini_path = AsiPath() + "\\" INI_FILE_NAME;
         IniConfigReader reader(ini_path);
         
+        // Main section
         is_mod_enabled = reader.readBool("", CFG_ENABLE_XVX, true);
         auto_reload_config = reader.readBool("", CFG_AUTO_RELOAD_CONFIG, true);
         output_dir = reader.getOutputDirectory("", CFG_OUTPUT_DIR);
         log_level = reader.readLogLevel("", CFG_LOG_LEVEL, LL_ERR);
+
+        // Export section
         fps = reader.readFraction(CFG_EXPORT_SECTION, CFG_EXPORT_FPS, {30000, 1001});
         motion_blur_samples = reader.readInt<uint8_t>(CFG_EXPORT_SECTION, CFG_EXPORT_MB_SAMPLES, 0, 0, 255);
         motion_blur_strength = reader.readFloat(CFG_EXPORT_SECTION, CFG_EXPORT_MB_STRENGTH, 0.5f, 0.0f, 1.0f);
         export_openexr = reader.readBool(CFG_EXPORT_SECTION, CFG_EXPORT_OPENEXR, false);
         disable_watermark = reader.readBool(CFG_EXPORT_SECTION, CFG_DISABLE_WATERMARK, false);
-        disable_replay_camera_distance_limit = reader.readBool("", CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT, false);
+
+        // Editor section
+        disable_replay_camera_distance_limit = reader.readBool(CFG_EDITOR_SECTION, CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT, false);
         
         readEncoderConfig();
     }

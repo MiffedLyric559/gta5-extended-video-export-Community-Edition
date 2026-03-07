@@ -19,6 +19,7 @@
 #define CFG_DISABLE_WATERMARK "disable_watermark"
 
 // Editor section
+#define CFG_EDITOR_SECTION "EDITOR"
 #define CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT "disable_replay_camera_distance_limit"
 
 // Format section
