@@ -109,6 +109,31 @@ static bool IsGtaIntentionalTerminate(const EXCEPTION_POINTERS* ep) {
            (ep->ExceptionRecord->ExceptionInformation[1] == 0);
 }
 
+static bool IsRTDynamicCastNullRttiCrash(const EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return false;
+    if (ep->ExceptionRecord->NumberParameters < 2)
+        return false;
+    if (ep->ExceptionRecord->ExceptionInformation[0] != 0)
+        return false;
+    if (ep->ExceptionRecord->ExceptionInformation[1] != 0x0000000000000004ULL)
+        return false;
+    HMODULE hModule = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(ep->ExceptionRecord->ExceptionAddress),
+            &hModule)) {
+        return false;
+    }
+    char modulePath[MAX_PATH] = {};
+    if (!GetModuleFileNameA(hModule, modulePath, MAX_PATH))
+        return false;
+    for (char* p = modulePath; *p; ++p)
+        *p = static_cast<char>(::tolower(static_cast<unsigned char>(*p)));
+    return ::strstr(modulePath, "vcruntime140.dll") != nullptr;
+}
+
 static bool IsStreamingArchetypeSentinelCrash(const EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
         return false;
@@ -120,7 +145,7 @@ static bool IsStreamingArchetypeSentinelCrash(const EXCEPTION_POINTERS* ep) {
 
     if (ep->ExceptionRecord->ExceptionInformation[1] != 0xFFFFFFFFFFFFFFFFULL)
         return false;
-    
+
     HMODULE hModule = nullptr;
     if (!GetModuleHandleExA(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -471,6 +496,9 @@ static LONG WINAPI VectoredCrashHandler(EXCEPTION_POINTERS* ep) {
     if (IsStreamingArchetypeSentinelCrash(ep))
         return EXCEPTION_CONTINUE_SEARCH;
 
+    if (IsRTDynamicCastNullRttiCrash(ep))
+        return EXCEPTION_CONTINUE_SEARCH;
+
     if (InterlockedCompareExchange(&g_crashInProgress, 1L, 0L) != 0L)
         return EXCEPTION_CONTINUE_SEARCH;
 
@@ -487,6 +515,11 @@ static LONG WINAPI UnhandledCrashHandler(EXCEPTION_POINTERS* ep) {
     }
 
     if (IsStreamingArchetypeSentinelCrash(ep)) {
+        return g_previousExceptionFilter
+               ? g_previousExceptionFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    if (IsRTDynamicCastNullRttiCrash(ep)) {
         return g_previousExceptionFilter
                ? g_previousExceptionFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
