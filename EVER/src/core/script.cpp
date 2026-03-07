@@ -1312,6 +1312,7 @@ void ever::initialize() {
         LOG(LL_NFO, "Image base:", ((void*)info.lpBaseOfDll));
 
         uint64_t pGetRenderTimeBase = NULL;
+        uint64_t pReplayGetMaxDistanceAllowedFromPlayer = NULL;
         uint64_t pCreateTexture = NULL;
         uint64_t pCreateThread = NULL;
         uint64_t pStartBakeProject = NULL;
@@ -1326,6 +1327,9 @@ void ever::initialize() {
         patternScanner->addPattern("get_render_time_base_function", 
                                     ever::hooking::patterns::getRenderTimeBase, 
                                     &pGetRenderTimeBase);
+        patternScanner->addPattern("replay_get_max_distance_allowed_from_player",
+                        ever::hooking::patterns::replayGetMaxDistanceAllowedFromPlayer,
+                        &pReplayGetMaxDistanceAllowedFromPlayer);
         patternScanner->addPattern("create_thread_function", 
                                     ever::hooking::patterns::createThread, 
                                     &pCreateThread);
@@ -1359,6 +1363,7 @@ void ever::initialize() {
         patternScanner->performScan();
 
         logResolvedHookTarget("GetRenderTimeBase", pGetRenderTimeBase);
+        logResolvedHookTarget("ReplayGetMaxDistanceAllowedFromPlayer", pReplayGetMaxDistanceAllowedFromPlayer);
         logResolvedHookTarget("CreateTexture", pCreateTexture);
         logResolvedHookTarget("CreateThread", pCreateThread);
         logResolvedHookTarget("StartBakeProject", pStartBakeProject);
@@ -1381,6 +1386,17 @@ void ever::initialize() {
             } else {
                 LOG(LL_ERR, "Could not find the address for FPS function.");
                 LOG(LL_ERR, "Custom FPS support is DISABLED!!!");
+            }
+
+            if (pReplayGetMaxDistanceAllowedFromPlayer) {
+                PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(GetMaxDistanceAllowedFromPlayer,
+                                                      pReplayGetMaxDistanceAllowedFromPlayer,
+                                                      PLH::x64Detour::detour_scheme_t::INPLACE);
+                LOG(LL_NFO, "Replay GetMaxDistanceAllowedFromPlayer hook installed. trampoline:",
+                    reinterpret_cast<void*>(GameHooks::GetMaxDistanceAllowedFromPlayer::OriginalFunc));
+            } else {
+                LOG(LL_WRN, "Could not find replay max distance function.");
+                LOG(LL_WRN, "Replay camera distance limit bypass will be unavailable.");
             }
 
             if (pCreateTexture) {
@@ -2514,6 +2530,33 @@ float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
                          (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1));
     // float result = 1000.0f / 60.0f;
     LOG(LL_NFO, "Time step: ", result);
+    POST();
+    return result;
+}
+
+float GameHooks::GetMaxDistanceAllowedFromPlayer::Implementation(void* thisPtr,
+                                                                 uint8_t considerEditModeForDistanceReduction) {
+    PRE();
+
+    static bool s_lastBypassState = false;
+    const bool bypassDistanceLimit = Config::Manager::disable_replay_camera_distance_limit;
+    if (bypassDistanceLimit != s_lastBypassState) {
+        LOG(LL_NFO, "Replay camera distance limit bypass ", bypassDistanceLimit ? "ENABLED" : "DISABLED");
+        s_lastBypassState = bypassDistanceLimit;
+    }
+
+    if (bypassDistanceLimit) {
+        constexpr float kUnlimitedReplayDistance = 1000000.0f;
+        POST();
+        return kUnlimitedReplayDistance;
+    }
+
+    if (!OriginalFunc) {
+        POST();
+        return 30.0f;
+    }
+
+    const float result = OriginalFunc(thisPtr, considerEditModeForDistanceReduction);
     POST();
     return result;
 }

@@ -17,6 +17,7 @@ namespace Config {
         static bool auto_reload_config;
         static bool export_openexr;
         static bool disable_watermark;
+        static bool disable_replay_camera_distance_limit;
         static string output_dir;
         static LogLevel log_level;
         static pair<uint32_t, uint32_t> fps;

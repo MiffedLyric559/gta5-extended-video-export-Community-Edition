@@ -18,6 +18,9 @@
 #define CFG_EXPORT_OPENEXR "export_openexr"
 #define CFG_DISABLE_WATERMARK "disable_watermark"
 
+// Editor section
+#define CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT "disable_replay_camera_distance_limit"
+
 // Format section
 #define CFG_FORMAT_SECTION "FORMAT"
 #define CFG_EXPORT_FORMAT "format"

@@ -21,6 +21,7 @@ namespace Config {
     float Manager::motion_blur_strength;
     bool Manager::export_openexr;
     bool Manager::disable_watermark;
+    bool Manager::disable_replay_camera_distance_limit;
     FFmpeg::FFENCODERCONFIG Manager::encoder_config;
 
     static string logLevelToString(LogLevel level) {
@@ -47,6 +48,7 @@ namespace Config {
         motion_blur_strength = reader.readFloat(CFG_EXPORT_SECTION, CFG_EXPORT_MB_STRENGTH, 0.5f, 0.0f, 1.0f);
         export_openexr = reader.readBool(CFG_EXPORT_SECTION, CFG_EXPORT_OPENEXR, false);
         disable_watermark = reader.readBool(CFG_EXPORT_SECTION, CFG_DISABLE_WATERMARK, false);
+        disable_replay_camera_distance_limit = reader.readBool("", CFG_DISABLE_REPLAY_CAMERA_DISTANCE_LIMIT, false);
         
         readEncoderConfig();
     }
@@ -65,6 +67,7 @@ namespace Config {
                 << "auto_reload_config = " << (auto_reload_config ? "true" : "false") << "\n"
                 << "output_folder = " << output_dir << "\n"
                 << "log_level = " << logLevelToString(log_level) << "\n"
+                << "disable_replay_camera_distance_limit = " << (disable_replay_camera_distance_limit ? "true" : "false") << "\n"
                 << "\n[EXPORT]\n";
             
             // Write FPS as integer if close to whole number, otherwise as fraction

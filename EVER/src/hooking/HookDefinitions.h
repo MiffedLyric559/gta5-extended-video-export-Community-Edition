@@ -110,6 +110,10 @@ DEFINE_NAMED_EXPORT_HOOK("d3d11.dll", D3D11CreateDeviceAndSwapChain, HRESULT,
 DEFINE_X64_HOOK(GetRenderTimeBase, float,
                 int64_t choice);
 
+DEFINE_X64_HOOK(GetMaxDistanceAllowedFromPlayer, float,
+                void* thisPtr,
+                uint8_t considerEditModeForDistanceReduction);
+
 DEFINE_X64_HOOK(CreateTexture, void*,
                 void* rcx,
                 char* name,

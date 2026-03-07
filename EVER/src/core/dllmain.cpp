@@ -122,6 +122,12 @@ static void draw_eve_settings(reshade::api::effect_runtime* runtime) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Remove Rockstar Editor watermark from exports");
 
+    if (ImGui::Checkbox("Disable Replay Camera Distance Limit", &Config::Manager::disable_replay_camera_distance_limit)) {
+        Config::Manager::save();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Allow Rockstar Editor free camera to move without player-distance restriction");
+
     if (ImGui::Checkbox("Auto Reload Config", &Config::Manager::auto_reload_config)) {
         Config::Manager::save();
     }

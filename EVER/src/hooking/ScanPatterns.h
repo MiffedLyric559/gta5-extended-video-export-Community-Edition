@@ -86,6 +86,12 @@ namespace ever {
             // CVideoEditorPlayback::CleanupLoadingScreen
             const std::string cleanupLoadingScreen = "33 C9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? B9 05 00 00 00 E8";
 
+            // camReplayDirector::GetMaxDistanceAllowedFromPlayer
+            const std::string replayGetMaxDistanceAllowedFromPlayer =
+                "83 3D ?? ?? ?? ?? 02 4C 8B 81 F0 02 00 00 F3 41 0F 10 40 38 "
+                "75 ?? 84 D2 74 ?? 8B 81 30 06 00 00 83 F8 FF 74 ?? 39 05 ?? ?? ?? ?? "
+                "75 ?? F3 41 0F 5C 40 3C C3";
+
         }
     }
 }
