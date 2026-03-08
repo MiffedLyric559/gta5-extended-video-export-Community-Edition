@@ -92,6 +92,42 @@ namespace ever {
                 "75 ?? 84 D2 74 ?? 8B 81 30 06 00 00 83 F8 FF 74 ?? 39 05 ?? ?? ?? ?? "
                 "75 ?? F3 41 0F 5C 40 3C C3";
 
+            // camReplayFreeCamera::UpdateCollision
+            const std::string replayFreeCameraUpdateCollision =
+                "48 89 4C 24 08 55 53 56 57 41 54 41 55 41 56 41 57 "
+                "48 8D AC 24 ?? ?? ?? ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 2B E0";
+
+            // camReplayFreeCamera::UpdateCollisionWithAttachEntity
+            const std::string replayFreeCameraUpdateCollisionWithAttachEntity =
+                "48 8B C4 48 89 58 10 55 56 57 41 54 41 55 41 56 41 57 "
+                "48 81 EC B0 00 00 00 0F 29 70 B8 0F 29 78 A8 44 0F 29 40 98";
+
+            // camReplayFreeCamera::IsPositionOutsidePlayerLimits
+            const std::string replayFreeCameraIsPositionOutsidePlayerLimits =
+                "40 53 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 0F 29 74 24 40 0F 29 7C 24 30 "
+                "44 0F 29 44 24 20 48 85 C0 74 ??";
+
+            // camReplayFreeCamera::SetToSafePosition
+            const std::string replayFreeCameraSetToSafePosition =
+                "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 57 41 54 41 55 41 56 41 57 "
+                "48 83 EC 70 0F 29 70 C8 0F 29 78 B8";
+
+            // camReplayFreeCamera::ComputeSafePosition
+            const std::string replayFreeCameraComputeSafePosition =
+                "48 89 5C 24 10 48 89 74 24 18 55 57 41 54 41 56 41 57 "
+                "48 8D AC 24 ?? ?? ?? ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 2B E0";
+
+            // camReplayFreeCamera::UpdateBlendPhaseConsideringWater
+            const std::string replayFreeCameraUpdateBlendPhaseConsideringWater =
+                "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 30 48 8B 81 ?? ?? ?? ?? "
+                "48 8B F9 F6 80 ?? ?? ?? ?? 01 0F 84 ?? ?? ?? ??";
+
+            // camReplayFreeCamera::ShouldFallbackToGameplayCamera
+            const std::string replayFreeCameraShouldFallbackToGameplayCamera =
+                "40 53 48 83 EC 30 8B 91 ?? ?? ?? ?? 48 8B D9 3B 15 ?? ?? ?? ?? "
+                "74 ?? 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? "
+                "89 83 ?? ?? ?? ?? 80 BB ?? ?? ?? ?? 00 74 ??";
+
         }
     }
 }
