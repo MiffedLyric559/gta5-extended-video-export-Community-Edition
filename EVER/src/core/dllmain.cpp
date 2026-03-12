@@ -232,7 +232,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
                 reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
                 g_reshade_registered = true;
             } else {
-                LOG(LL_ERR, "Failed to register with Reshade! EVE requires Reshade to function.");
+                LOG(LL_ERR, "Failed to register with Reshade! EVER requires Reshade to function.");
                 return FALSE;
             }
 
