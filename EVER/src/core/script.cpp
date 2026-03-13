@@ -113,6 +113,28 @@ namespace {
         return result;
     }
 
+    bool IsTrackedCreateTextureName(const std::string& name) {
+        return name == "DepthBuffer_Resolved" ||
+               name == "DepthBufferCopy" ||
+               name == "DepthBuffer" ||
+               name == "Depth Quarter" ||
+               name == "Depth Quarter Linear" ||
+               name == "GBUFFER_0" ||
+               name == "Edge Copy" ||
+               name == "BackBuffer" ||
+               name == "BackBuffer_Resolved" ||
+               name == "BackBufferCopy" ||
+               name == "VideoEncode";
+    }
+
+    bool IsRunningInFiveMRuntime() {
+        static const bool isFiveM =
+            GetModuleHandleW(L"citizen-game-main.dll") != nullptr ||
+            GetModuleHandleW(L"asi-five.dll") != nullptr ||
+            GetModuleHandleW(L"scripting-gta.dll") != nullptr;
+        return isFiveM;
+    }
+
     class ScopedFlagGuard {
     public:
         explicit ScopedFlagGuard(bool& flag) : ref(flag) { ref = true; }
@@ -3222,59 +3244,113 @@ void CreateNewExportContext() {
 
 void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint32_t r8d, uint32_t width,
                                                uint32_t height, const uint32_t format, void* rsp30) {
-    LOG(LL_TRC, "CreateTexture hook entry rcx:", rcx, " name ptr:", static_cast<const void*>(name),
-        " width:", width, " height:", height,
-        " format:", Logger::hex(format, 8));
-    void* result = OriginalFunc(rcx, name, r8d, width, height, format, rsp30);
+    const std::string safeName = SafeAnsiString(name);
+    const bool trackedTexture = IsTrackedCreateTextureName(safeName);
+    const bool runningInFiveM = IsRunningInFiveMRuntime();
 
-    const auto vresult = static_cast<void**>(result);
+    static std::atomic<uint64_t> s_createTextureCalls{0};
+    const uint64_t callIndex = s_createTextureCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    if (trackedTexture) {
+        LOG(LL_DBG, "CreateTexture tracked entry #", callIndex,
+            " rcx:", rcx,
+            " name:", safeName,
+            " name ptr:", static_cast<const void*>(name),
+            " width:", width,
+            " height:", height,
+            " format:", Logger::hex(format, 8));
+    }
+
+    void* result = OriginalFunc(rcx, name, r8d, width, height, format, rsp30);
 
     ComPtr<ID3D11Texture2D> pTexture;
     DXGI_FORMAT fmt = DXGI_FORMAT::DXGI_FORMAT_UNKNOWN;
-    if (name && result) {
-        if (const auto pUnknown = static_cast<IUnknown*>(*(vresult + 7));
-            pUnknown && SUCCEEDED(pUnknown->QueryInterface(pTexture.GetAddressOf()))) {
+
+    auto canRead = [](const void* ptr, size_t bytes) -> bool {
+        return ptr != nullptr && IsBadReadPtr(ptr, bytes) == 0;
+    };
+
+    auto tryQueryTexture = [&](IUnknown* pUnknown) -> bool {
+        if (!canRead(pUnknown, sizeof(void*))) {
+            return false;
+        }
+
+        // Validate the vtable pointer before issuing a COM virtual call.
+        void** vtbl = *reinterpret_cast<void***>(pUnknown);
+        if (!canRead(vtbl, sizeof(void*)) || !canRead(vtbl[0], sizeof(void*))) {
+            return false;
+        }
+
+        return SUCCEEDED(pUnknown->QueryInterface(pTexture.GetAddressOf()));
+    };
+
+    if (result) {
+        bool queried = false;
+
+        if (runningInFiveM) {
+            // FiveM may return an internal wrapper here; keep the legacy slot-7 path.
+            IUnknown* slot7Unknown = nullptr;
+            if (canRead(result, sizeof(void*) * 8)) {
+                slot7Unknown = *(reinterpret_cast<IUnknown**>(result) + 7);
+            }
+            queried = tryQueryTexture(slot7Unknown);
+        } else {
+            // Regular GTA V: probe direct COM result first, then legacy slot-7 fallback.
+            queried = tryQueryTexture(static_cast<IUnknown*>(result));
+
+            if (!queried) {
+                IUnknown* slot7Unknown = nullptr;
+                if (canRead(result, sizeof(void*) * 8)) {
+                    slot7Unknown = *(reinterpret_cast<IUnknown**>(result) + 7);
+                }
+                queried = tryQueryTexture(slot7Unknown);
+            }
+        }
+
+        if (queried && pTexture) {
             D3D11_TEXTURE2D_DESC desc;
             pTexture->GetDesc(&desc);
             fmt = desc.Format;
         }
     }
 
-    LOG(LL_TRC, "CreateTexture:", " rcx:", rcx, " name ptr:", static_cast<const void*>(name),
-        " name:", SafeAnsiString(name), " r8d:", Logger::hex(r8d, 8),
-        " width:", width, " height:", height, " fmt:", conv_dxgi_format_to_string(fmt), " result:", result,
-        " *r+0:", vresult ? *(vresult + 0) : "<NULL>", " *r+1:", vresult ? *(vresult + 1) : "<NULL>",
-        " *r+2:", vresult ? *(vresult + 2) : "<NULL>", " *r+3:", vresult ? *(vresult + 3) : "<NULL>",
-        " *r+4:", vresult ? *(vresult + 4) : "<NULL>", " *r+5:", vresult ? *(vresult + 5) : "<NULL>",
-        " *r+6:", vresult ? *(vresult + 6) : "<NULL>", " *r+7:", vresult ? *(vresult + 7) : "<NULL>",
-        " *r+8:", vresult ? *(vresult + 8) : "<NULL>", " *r+9:", vresult ? *(vresult + 9) : "<NULL>",
-        " *r+10:", vresult ? *(vresult + 10) : "<NULL>", " *r+11:", vresult ? *(vresult + 11) : "<NULL>",
-        " *r+12:", vresult ? *(vresult + 12) : "<NULL>", " *r+13:", vresult ? *(vresult + 13) : "<NULL>",
-        " *r+14:", vresult ? *(vresult + 14) : "<NULL>", " *r+15:", vresult ? *(vresult + 15) : "<NULL>");
+    const bool suspiciousNamePtr = safeName.rfind("<INVALID PTR", 0) == 0;
+    if (trackedTexture || suspiciousNamePtr) {
+        LOG(LL_DBG, "CreateTexture result #", callIndex,
+            " name:", safeName,
+            " result:", result,
+            " fmt:", conv_dxgi_format_to_string(fmt),
+            " queriedTexture:", (pTexture ? "yes" : "no"));
+    } else if ((callIndex % 5000) == 0) {
+        LOG(LL_DBG, "CreateTexture heartbeat #", callIndex,
+            " name:", safeName,
+            " result:", result,
+            " fmt:", conv_dxgi_format_to_string(fmt));
+    }
 
     static bool presentHooked = false;
     if (!presentHooked && pTexture && !mainSwapChain) {
         presentHooked = true;
     }
 
-    if (pTexture && name) {
+    if (pTexture) {
         ComPtr<ID3D11Device> pDevice;
         pTexture->GetDevice(pDevice.GetAddressOf());
-        if ((std::strcmp("DepthBuffer_Resolved", name) == 0) || (std::strcmp("DepthBufferCopy", name) == 0)) {
+        if ((safeName == "DepthBuffer_Resolved") || (safeName == "DepthBufferCopy")) {
             pGameDepthBufferResolved = pTexture;
-        } else if (std::strcmp("DepthBuffer", name) == 0) {
+        } else if (safeName == "DepthBuffer") {
             pGameDepthBuffer = pTexture;
-        } else if (std::strcmp("Depth Quarter", name) == 0) {
+        } else if (safeName == "Depth Quarter") {
             pGameDepthBufferQuarter = pTexture;
-        } else if (std::strcmp("GBUFFER_0", name) == 0) {
+        } else if (safeName == "GBUFFER_0") {
             pGameGBuffer0 = pTexture;
-        } else if (std::strcmp("Edge Copy", name) == 0) {
+        } else if (safeName == "Edge Copy") {
             pGameEdgeCopy = pTexture;
             D3D11_TEXTURE2D_DESC desc;
             pTexture->GetDesc(&desc);
             REQUIRE(pDevice->CreateTexture2D(&desc, nullptr, pStencilTexture.GetAddressOf()),
                     "Failed to create stencil texture");
-        } else if (std::strcmp("Depth Quarter Linear", name) == 0) {
+        } else if (safeName == "Depth Quarter Linear") {
             pGameDepthBufferQuarterLinear = pTexture;
             D3D11_TEXTURE2D_DESC desc, resolvedDesc;
 
@@ -3293,7 +3369,7 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags = 0;
             LOG_CALL(LL_DBG, pDevice->CreateTexture2D(&desc, NULL, pLinearDepthTexture.GetAddressOf()));
-        } else if (std::strcmp("BackBuffer", name) == 0) {
+        } else if (safeName == "BackBuffer") {
             pGameBackBufferResolved = nullptr;
             pGameDepthBuffer = nullptr;
             pGameDepthBufferQuarter = nullptr;
@@ -3304,14 +3380,18 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
 
             pGameBackBuffer = pTexture;
 
-        } else if ((std::strcmp("BackBuffer_Resolved", name) == 0) || (std::strcmp("BackBufferCopy", name) == 0)) {
+        } else if ((safeName == "BackBuffer_Resolved") || (safeName == "BackBufferCopy")) {
             pGameBackBufferResolved = pTexture;
-        } else if (std::strcmp("VideoEncode", name) == 0) {
+        } else if (safeName == "VideoEncode") {
             std::lock_guard<std::mutex> sessionLock(mxSession);
             const ComPtr<ID3D11Texture2D>& pExportTexture = pTexture;
 
             D3D11_TEXTURE2D_DESC desc;
             pExportTexture->GetDesc(&desc);
+
+            LOG(LL_DBG, "CreateTexture VideoEncode acquired. width=", desc.Width,
+                " height=", desc.Height,
+                " format=", conv_dxgi_format_to_string(desc.Format));
 
             LOG_CALL(LL_DBG, ::exportContext.reset());
             LOG_CALL(LL_DBG, encodingSession.reset());
@@ -3338,6 +3418,13 @@ void* GameHooks::CreateTexture::Implementation(void* rcx, char* name, const uint
                 LOG_CALL(LL_DBG, ::exportContext.reset());
             }
         }
+    } else if (trackedTexture) {
+        LOG(LL_WRN, "CreateTexture tracked texture without ID3D11Texture2D result. name=", safeName,
+            " rcx=", rcx,
+            " result=", result,
+            " width=", width,
+            " height=", height,
+            " format=", Logger::hex(format, 8));
     }
 
     return result;
